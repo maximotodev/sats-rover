@@ -1,7 +1,17 @@
 // src/components/map/MerchantDrawer.tsx
 import React, { useState, useEffect } from "react";
 import { Merchant } from "@/lib/types";
-import { X, MapPin, Zap, Bitcoin, Navigation, User } from "lucide-react";
+import {
+  X,
+  MapPin,
+  Zap,
+  Bitcoin,
+  Navigation,
+  User,
+  KeyRound,
+  Eye,
+  EyeOff,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useNostr } from "@/hooks/use-nostr";
 import { NDKEvent, NDKUserProfile } from "@nostr-dev-kit/ndk";
@@ -11,27 +21,39 @@ interface MerchantDrawerProps {
   onClose: () => void;
 }
 
-// Helper type for storing profiles in state
 type ProfileMap = Record<string, NDKUserProfile>;
 
 export default function MerchantDrawer({
   merchant,
   onClose,
 }: MerchantDrawerProps) {
-  const { user, login, publishCheckIn, fetchCheckIns, ndk } = useNostr();
+  // Use updated hook names
+  const {
+    user,
+    loginWithExtension,
+    loginWithNsec,
+    publishCheckIn,
+    fetchCheckIns,
+    ndk,
+  } = useNostr();
 
+  // Local State
   const [reviews, setReviews] = useState<NDKEvent[]>([]);
-  const [profiles, setProfiles] = useState<ProfileMap>({}); // Store profiles here
+  const [profiles, setProfiles] = useState<ProfileMap>({});
   const [loadingReviews, setLoadingReviews] = useState(false);
 
+  // Login UI State
+  const [showNsecInput, setShowNsecInput] = useState(false);
+  const [nsec, setNsec] = useState("");
+  const [showSecret, setShowSecret] = useState(false);
+
+  // FETCH REVIEWS & PROFILES
   useEffect(() => {
     if (merchant) {
       setLoadingReviews(true);
       fetchCheckIns(merchant.id).then(async (notes) => {
         setReviews(notes);
 
-        // 🚀 BATCH FETCH PROFILES (Senior UX Move)
-        // We gather all unique pubkeys and fetch their metadata in parallel
         if (ndk && notes.length > 0) {
           const uniquePubkeys = Array.from(new Set(notes.map((n) => n.pubkey)));
           const newProfiles: ProfileMap = {};
@@ -43,10 +65,8 @@ export default function MerchantDrawer({
               if (profile) newProfiles[pk] = profile;
             })
           );
-
           setProfiles((prev) => ({ ...prev, ...newProfiles }));
         }
-
         setLoadingReviews(false);
       });
     } else {
@@ -54,19 +74,40 @@ export default function MerchantDrawer({
     }
   }, [merchant, ndk]);
 
-  const handleNostrAction = async () => {
-    if (!merchant) return;
-    if (!user) {
-      await login();
+  // HANDLE LOGIN FLOW
+  const handleLoginStart = async () => {
+    if (window.nostr) {
+      try {
+        await loginWithExtension();
+      } catch (e) {
+        setShowNsecInput(true); // Extension failed/rejected, fallback to NSEC
+      }
     } else {
-      await publishCheckIn(
-        merchant.name,
-        merchant.id,
-        merchant.lat,
-        merchant.lon
-      );
-      // Optimistic update: Refresh reviews immediately after posting
-      // (In a real app, we'd append the local event instantly)
+      setShowNsecInput(true); // No extension, show NSEC input
+    }
+  };
+
+  const handleNsecSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!nsec.startsWith("nsec1")) {
+      alert("Invalid format. Must start with nsec1...");
+      return;
+    }
+    await loginWithNsec(nsec);
+    setShowNsecInput(false);
+  };
+
+  const handleAction = async () => {
+    if (!user) {
+      handleLoginStart();
+    } else {
+      if (merchant)
+        await publishCheckIn(
+          merchant.name,
+          merchant.id,
+          merchant.lat,
+          merchant.lon
+        );
     }
   };
 
@@ -79,10 +120,10 @@ export default function MerchantDrawer({
     >
       {merchant && (
         <>
-          {/* ... Header and Badges (Same as before) ... */}
           <div className="w-12 h-1.5 bg-gray-300 rounded-full mx-auto mb-4" />
+
+          {/* HEADER */}
           <div className="flex justify-between items-start mb-4">
-            {/* Title Block */}
             <div>
               <h2 className="text-xl font-bold text-gray-900">
                 {merchant.name}
@@ -102,7 +143,7 @@ export default function MerchantDrawer({
             </button>
           </div>
 
-          {/* Badges Block */}
+          {/* BADGES */}
           <div className="flex flex-wrap gap-2 mb-6">
             {merchant.tags["payment:lightning"] === "yes" && (
               <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800">
@@ -118,31 +159,87 @@ export default function MerchantDrawer({
             )}
           </div>
 
-          {/* Buttons Block */}
+          {/* ACTION AREA */}
           <div className="grid grid-cols-2 gap-3 mb-6">
-            <button
-              onClick={handleNostrAction}
-              className="flex items-center justify-center px-4 py-3 border border-transparent text-sm font-medium rounded-xl text-white bg-purple-600 hover:bg-purple-700 shadow-sm transition-all active:scale-95"
-            >
-              <User className="w-4 h-4 mr-2" />
-              {user ? "Check In ⚡" : "Nostr Login"}
-            </button>
-            <a
-              href={`https://www.google.com/maps/dir/?api=1&destination=${merchant.lat},${merchant.lon}`}
-              target="_blank"
-              rel="noreferrer"
-              className="flex items-center justify-center px-4 py-3 border border-gray-200 text-sm font-medium rounded-xl text-gray-700 bg-white hover:bg-gray-50 shadow-sm"
-            >
-              <Navigation className="w-4 h-4 mr-2" /> Navigate
-            </a>
+            {/* If Showing Login Input */}
+            {showNsecInput && !user ? (
+              <form
+                onSubmit={handleNsecSubmit}
+                className="col-span-2 bg-gray-50 p-3 rounded-xl border border-gray-200"
+              >
+                <div className="flex justify-between items-center mb-2">
+                  <label className="text-xs font-bold text-gray-500 uppercase">
+                    Travel Mode Login
+                  </label>
+                  <button type="button" onClick={() => setShowNsecInput(false)}>
+                    <X className="w-4 h-4 text-gray-400" />
+                  </button>
+                </div>
+                <div className="relative">
+                  <input
+                    type={showSecret ? "text" : "password"}
+                    placeholder="nsec1..."
+                    className="w-full text-sm p-2 pr-10 border rounded-md focus:ring-2 focus:ring-purple-500 outline-none"
+                    value={nsec}
+                    onChange={(e) => setNsec(e.target.value)}
+                  />
+                  <button
+                    type="button"
+                    className="absolute right-2 top-2.5 text-gray-400"
+                    onClick={() => setShowSecret(!showSecret)}
+                  >
+                    {showSecret ? (
+                      <EyeOff className="w-4 h-4" />
+                    ) : (
+                      <Eye className="w-4 h-4" />
+                    )}
+                  </button>
+                </div>
+                <button
+                  type="submit"
+                  className="w-full mt-2 bg-purple-600 text-white text-xs font-bold py-2 rounded-md hover:bg-purple-700"
+                >
+                  Connect Key
+                </button>
+                <p className="text-[10px] text-red-500 mt-2 leading-tight">
+                  ⚠️ <strong>Security Warning:</strong> Only paste your nsec if
+                  you trust this device.
+                </p>
+              </form>
+            ) : (
+              // Normal Buttons
+              <>
+                <button
+                  onClick={handleAction}
+                  className="flex items-center justify-center px-4 py-3 border border-transparent text-sm font-medium rounded-xl text-white bg-purple-600 hover:bg-purple-700 shadow-sm transition-all active:scale-95"
+                >
+                  {user ? (
+                    <>
+                      <User className="w-4 h-4 mr-2" /> Check In ⚡
+                    </>
+                  ) : (
+                    <>
+                      <KeyRound className="w-4 h-4 mr-2" /> Login
+                    </>
+                  )}
+                </button>
+                <a
+                  href={`https://www.google.com/maps/dir/?api=1&destination=${merchant.lat},${merchant.lon}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="flex items-center justify-center px-4 py-3 border border-gray-200 text-sm font-medium rounded-xl text-gray-700 bg-white hover:bg-gray-50 shadow-sm"
+                >
+                  <Navigation className="w-4 h-4 mr-2" /> Navigate
+                </a>
+              </>
+            )}
           </div>
 
-          {/* REVIEWS SECTION - UPDATED WITH PROFILES */}
+          {/* REVIEWS LIST */}
           <div className="border-t border-gray-100 pt-4">
             <h3 className="text-sm font-semibold text-gray-900 mb-3">
               Community Trust ⚡
             </h3>
-
             {loadingReviews ? (
               <div className="text-xs text-gray-400 italic">
                 Syncing with Nostr...

@@ -1,8 +1,13 @@
 // src/hooks/use-nostr.ts
 import { useState, useEffect } from "react";
-import NDK, { NDKEvent, NDKNip07Signer, NDKUser } from "@nostr-dev-kit/ndk";
+import NDK, {
+  NDKEvent,
+  NDKNip07Signer,
+  NDKPrivateKeySigner,
+  NDKUser,
+} from "@nostr-dev-kit/ndk";
+import { nip19 } from "nostr-tools";
 
-// SINGLETON: Keep one NDK instance alive for the whole app session
 let ndkInstance: NDK | null = null;
 
 export function useNostr() {
@@ -10,7 +15,6 @@ export function useNostr() {
   const [user, setUser] = useState<NDKUser | null>(null);
   const [connected, setConnected] = useState(false);
 
-  // 1. Initialize NDK (Connect to Relays)
   useEffect(() => {
     const init = async () => {
       if (ndkInstance) {
@@ -18,16 +22,13 @@ export function useNostr() {
         setConnected(true);
         return;
       }
-
       const newNdk = new NDK({
         explicitRelayUrls: [
           "wss://relay.damus.io",
           "wss://relay.primal.net",
           "wss://nos.lol",
-          "wss://relay.snort.social",
         ],
       });
-
       try {
         await newNdk.connect();
         ndkInstance = newNdk;
@@ -38,22 +39,37 @@ export function useNostr() {
         console.error("Failed to connect to Nostr", e);
       }
     };
-
     init();
   }, []);
 
-  // 2. Login (NIP-07 Extension)
-  const login = async () => {
+  // Login A: Extension (Desktop)
+  const loginWithExtension = async () => {
     if (!ndk) return;
-
-    // TypeScript now knows about window.nostr because of the import above
-    if (!window.nostr) {
-      alert("Please install the Alby Extension (getalby.com) to log in!");
-      return;
-    }
-
+    if (!window.nostr) throw new Error("No extension found");
     try {
       const signer = new NDKNip07Signer();
+      ndk.signer = signer;
+      const ndkUser = await signer.user();
+      await ndkUser.fetchProfile();
+      setUser(ndkUser);
+      return ndkUser;
+    } catch (e) {
+      console.error("Extension login failed", e);
+      throw e;
+    }
+  };
+
+  // Login B: NSEC (Mobile)
+  const loginWithNsec = async (nsec: string) => {
+    if (!ndk) return;
+    try {
+      const { type, data } = nip19.decode(nsec);
+      if (type !== "nsec") throw new Error("Invalid nsec format");
+
+      // FIX: Convert Uint8Array to Hex String
+      const hexKey = Buffer.from(data as Uint8Array).toString("hex");
+
+      const signer = new NDKPrivateKeySigner(hexKey);
       ndk.signer = signer;
 
       const ndkUser = await signer.user();
@@ -62,11 +78,11 @@ export function useNostr() {
       setUser(ndkUser);
       return ndkUser;
     } catch (e) {
-      console.error("Login failed", e);
+      console.error("NSEC Login failed", e);
+      throw e;
     }
   };
 
-  // 3. Check In (Publish Event)
   const publishCheckIn = async (
     merchantName: string,
     merchantId: string,
@@ -77,21 +93,17 @@ export function useNostr() {
       alert("Please login first!");
       return;
     }
-
     const event = new NDKEvent(ndk);
-    event.kind = 1; // Short Text Note
-
+    event.kind = 1;
     event.content = `Checking in at ${merchantName} ⚡ #SatsRover\n\nSpending sats in the wild!`;
-
     event.tags = [
       ["t", "satsrover"],
       ["t", "bitcoin"],
       ["g", String(lat), String(lon)],
       ["r", merchantId],
       ["l", "checkin", "satsrover"],
-      ["client", "satsrover"], // 👈 ADD THIS: Future-proof data analytics
+      ["client", "satsrover"],
     ];
-
     try {
       await event.publish();
       alert("Check-in published to Nostr! 🚀");
@@ -105,25 +117,27 @@ export function useNostr() {
 
   const fetchCheckIns = async (merchantId: string) => {
     if (!ndk) return [];
-
-    // Query Relays: "Give me Kind 1 notes tagged with 'r' = merchantId"
-    // We also look for the 'satsrover' tag to filter noise
     const filter = {
       kinds: [1],
       "#r": [merchantId],
       "#t": ["satsrover"],
-      limit: 10, // Just the last 10 for now
+      limit: 10,
     };
-
     try {
       const events = await ndk.fetchEvents(filter);
-      // Convert Set to Array and sort by time (newest first)
       return Array.from(events).sort((a, b) => b.created_at! - a.created_at!);
     } catch (e) {
-      console.error("Failed to fetch check-ins", e);
       return [];
     }
   };
 
-  return { ndk, connected, user, login, publishCheckIn, fetchCheckIns };
+  return {
+    ndk,
+    connected,
+    user,
+    loginWithExtension,
+    loginWithNsec,
+    publishCheckIn,
+    fetchCheckIns,
+  };
 }
