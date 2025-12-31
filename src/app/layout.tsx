@@ -1,13 +1,10 @@
-// src/app/layout.tsx
 import type { Metadata } from "next";
-import { Inter } from "next/font/google";
 import "./globals.css";
-
-const inter = Inter({ subsets: ["latin"] });
+import { NostrSessionProvider } from "@/contexts/NostrSessionContext"; // ✅ Import
 
 export const metadata: Metadata = {
   title: "SatsRover",
-  description: "Bitcoin Travel & Nostr Reviews",
+  description: "Sovereign Bitcoin Discovery",
   manifest: "/manifest.json",
 };
 
@@ -18,8 +15,10 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <head></head>
-      <body className={inter.className}>{children}</body>
+      <body>
+        {/* ✅ Wrap Children */}
+        <NostrSessionProvider>{children}</NostrSessionProvider>
+      </body>
     </html>
   );
 }

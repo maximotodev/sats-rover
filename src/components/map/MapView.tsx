@@ -1,36 +1,55 @@
 "use client";
-
 import React, { useEffect, useRef, useState } from "react";
 import maplibregl from "maplibre-gl";
 import { Merchant } from "@/lib/types";
 import MerchantDrawer from "./MerchantDrawer";
-import HubSelector from "./HubSelector";
 
-export default function MapView() {
+const MAP_STYLE_DARK =
+  "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json";
+
+interface MapViewProps {
+  flyToCoords: { lat: number; lon: number } | null;
+  onInteract: () => void;
+}
+
+// ✅ Visual Signal State Definition
+interface VisualSignalState {
+  intensity: number; // 0.0 to 1.0
+  glow: boolean;
+  opacity: number;
+}
+
+export default function MapView({ flyToCoords, onInteract }: MapViewProps) {
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<maplibregl.Map | null>(null);
   const markers = useRef<maplibregl.Marker[]>([]);
-
   const [merchants, setMerchants] = useState<Merchant[]>([]);
   const [selectedMerchant, setSelectedMerchant] = useState<Merchant | null>(
     null
   );
-  const [loading, setLoading] = useState(false);
 
+  // FlyTo Logic
+  useEffect(() => {
+    if (map.current && flyToCoords) {
+      map.current.flyTo({
+        center: [flyToCoords.lon, flyToCoords.lat],
+        zoom: 14,
+        speed: 1.5,
+      });
+    }
+  }, [flyToCoords]);
+
+  // Init Map
   useEffect(() => {
     if (map.current || !mapContainer.current) return;
-
     const container = mapContainer.current;
     container.style.width = "100%";
     container.style.height = "100%";
 
-    const MAP_STYLE =
-      "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json";
-
     map.current = new maplibregl.Map({
-      container: container,
-      style: MAP_STYLE,
-      center: [-89.42, 13.49], // Start at El Zonte
+      container,
+      style: MAP_STYLE_DARK,
+      center: [-89.42, 13.49], // El Zonte
       zoom: 15,
       attributionControl: false,
     });
@@ -39,9 +58,11 @@ export default function MapView() {
       setTimeout(() => map.current?.resize(), 0);
       fetchMerchants();
     });
-
     map.current.on("moveend", () => fetchMerchants());
-    map.current.on("click", () => setSelectedMerchant(null));
+    map.current.on("click", () => {
+      setSelectedMerchant(null);
+      onInteract();
+    });
 
     return () => {
       map.current?.remove();
@@ -50,92 +71,88 @@ export default function MapView() {
   }, []);
 
   const fetchMerchants = async () => {
-    if (!map.current) return;
-
-    // Zoom Gate
-    const zoom = map.current.getZoom();
-    if (zoom < 13) {
+    if (!map.current || map.current.getZoom() < 12) {
       setMerchants([]);
       return;
     }
-
     const bounds = map.current.getBounds();
     const bbox = [
-      bounds.getSouth().toFixed(4),
-      bounds.getWest().toFixed(4),
-      bounds.getNorth().toFixed(4),
-      bounds.getEast().toFixed(4),
-    ].join(",");
-
-    setLoading(true);
+      bounds.getSouth(),
+      bounds.getWest(),
+      bounds.getNorth(),
+      bounds.getEast(),
+    ]
+      .map((c) => c.toFixed(4))
+      .join(",");
 
     try {
       const res = await fetch(`/api/merchants?bbox=${bbox}`);
       const json = await res.json();
       if (json.data) setMerchants(json.data);
-    } catch (err) {
-      console.error("Failed to load merchants", err);
-    } finally {
-      setLoading(false);
+    } catch (e) {
+      console.error(e);
     }
   };
 
-  // ✅ Fly To Hub Logic
-  const flyToHub = (lat: number, lon: number) => {
-    if (!map.current) return;
-    setSelectedMerchant(null);
-    map.current.flyTo({
-      center: [lon, lat],
-      zoom: 14,
-      speed: 1.5,
-    });
+  // ✅ DERIVE VISUAL STATE (The "Signal" Logic)
+  const deriveVisualState = (merchant: Merchant): VisualSignalState => {
+    // 1. Bootstrap (Source)
+    const isVerified = merchant.source === "btcmap";
+
+    // 2. Visual Logic
+    // Verified = 100% Opacity, Strong Glow
+    // Unverified = 40% Opacity, No Glow
+    return {
+      intensity: isVerified ? 1.0 : 0.2,
+      glow: isVerified,
+      opacity: isVerified ? 1.0 : 0.4,
+    };
   };
 
+  // ✅ RENDER MARKERS (All Orange)
   useEffect(() => {
     if (!map.current) return;
-    markers.current.forEach((marker) => marker.remove());
+    markers.current.forEach((m) => m.remove());
     markers.current = [];
 
     merchants.forEach((merchant) => {
       const container = document.createElement("div");
-      container.className = "cursor-pointer p-1";
+      container.className = "cursor-pointer p-3";
 
       const dot = document.createElement("div");
-      dot.className =
-        "w-6 h-6 bg-blue-600 rounded-full border-2 border-white shadow-lg transform transition-transform duration-200 hover:scale-125";
+      const state = deriveVisualState(merchant);
+
+      // ✅ UNIFIED ORANGE LOGIC
+      const baseStyle =
+        "rounded-full bg-[#F7931A] transition-all duration-300 hover:scale-150 hover:opacity-100 hover:shadow-[0_0_10px_#F7931A]";
+      const glowStyle = state.glow
+        ? "shadow-[0_0_15px_#F7931A] border-2 border-white z-30"
+        : "border border-white/10 z-10";
+      const sizeStyle = state.glow ? "w-4 h-4" : "w-2 h-2";
+
+      dot.className = `${baseStyle} ${glowStyle} ${sizeStyle}`;
+      dot.style.opacity = state.opacity.toString();
 
       container.appendChild(dot);
 
       container.addEventListener("click", (e) => {
         e.stopPropagation();
         setSelectedMerchant(merchant);
+        onInteract();
         map.current?.flyTo({ center: [merchant.lon, merchant.lat], zoom: 16 });
       });
 
-      const marker = new maplibregl.Marker({ element: container })
-        .setLngLat([merchant.lon, merchant.lat])
-        .addTo(map.current!);
-
-      markers.current.push(marker);
+      markers.current.push(
+        new maplibregl.Marker({ element: container })
+          .setLngLat([merchant.lon, merchant.lat])
+          .addTo(map.current!)
+      );
     });
   }, [merchants]);
 
   return (
-    <div className="relative w-full h-full bg-gray-200">
+    <div className="relative w-full h-full bg-[#050505]">
       <div ref={mapContainer} className="absolute inset-0" />
-
-      {/* Hub Selector */}
-      <HubSelector onSelect={flyToHub} />
-
-      {loading && (
-        <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-white/90 backdrop-blur-sm px-4 py-2 rounded-full shadow-md z-10 flex items-center gap-2">
-          <div className="w-4 h-4 border-2 border-orange-500 border-t-transparent rounded-full animate-spin" />
-          <span className="text-xs font-semibold text-gray-700">
-            Scanning for Sats...
-          </span>
-        </div>
-      )}
-
       <MerchantDrawer
         merchant={selectedMerchant}
         onClose={() => setSelectedMerchant(null)}

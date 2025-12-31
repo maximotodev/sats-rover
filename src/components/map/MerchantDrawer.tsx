@@ -1,4 +1,3 @@
-// src/components/map/MerchantDrawer.tsx
 import React, { useState, useEffect } from "react";
 import { Merchant } from "@/lib/types";
 import {
@@ -11,9 +10,14 @@ import {
   KeyRound,
   Eye,
   EyeOff,
+  ThumbsUp,
+  ThumbsDown,
+  Meh,
+  Activity,
+  Signal,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { useNostr } from "@/hooks/use-nostr";
+import { useSession } from "@/contexts/NostrSessionContext";
 import { NDKEvent, NDKUserProfile } from "@nostr-dev-kit/ndk";
 
 interface MerchantDrawerProps {
@@ -27,37 +31,52 @@ export default function MerchantDrawer({
   merchant,
   onClose,
 }: MerchantDrawerProps) {
-  // Use updated hook names
-  const {
-    user,
-    loginWithExtension,
-    loginWithNsec,
-    publishCheckIn,
-    fetchCheckIns,
-    ndk,
-  } = useNostr();
+  const { session, loginWithExtension, loginWithNsec, publishSignal, ndk } =
+    useSession();
 
-  // Local State
+  // Data State
   const [reviews, setReviews] = useState<NDKEvent[]>([]);
   const [profiles, setProfiles] = useState<ProfileMap>({});
   const [loadingReviews, setLoadingReviews] = useState(false);
 
-  // Login UI State
+  // Login UI State (Fallback)
   const [showNsecInput, setShowNsecInput] = useState(false);
   const [nsec, setNsec] = useState("");
   const [showSecret, setShowSecret] = useState(false);
 
-  // FETCH REVIEWS & PROFILES
+  // Reporting State
+  const [isReporting, setIsReporting] = useState(false);
+  const [paymentStatus, setPaymentStatus] = useState<
+    "success" | "failed" | "did_not_try"
+  >("success");
+  const [comment, setComment] = useState("");
+
+  // 1. Fetch Logic
   useEffect(() => {
-    if (merchant) {
+    if (merchant && ndk) {
       setLoadingReviews(true);
-      fetchCheckIns(merchant.id).then(async (notes) => {
+      setIsReporting(false);
+      setPaymentStatus("success");
+      setComment("");
+
+      // Manual fetch because fetchCheckIns helper might need updating to new hook style
+      // or we just inline the simple fetch here for clarity
+      const filter = {
+        kinds: [1],
+        "#r": [merchant.id],
+        "#t": ["satsrover"],
+        limit: 50,
+      };
+
+      ndk.fetchEvents(filter).then(async (events) => {
+        const notes = Array.from(events).sort(
+          (a, b) => b.created_at! - a.created_at!
+        );
         setReviews(notes);
 
-        if (ndk && notes.length > 0) {
+        if (notes.length > 0) {
           const uniquePubkeys = Array.from(new Set(notes.map((n) => n.pubkey)));
           const newProfiles: ProfileMap = {};
-
           await Promise.all(
             uniquePubkeys.map(async (pk) => {
               const user = ndk.getUser({ pubkey: pk });
@@ -74,230 +93,364 @@ export default function MerchantDrawer({
     }
   }, [merchant, ndk]);
 
-  // HANDLE LOGIN FLOW
+  // 2. Handlers
   const handleLoginStart = async () => {
     if (window.nostr) {
       try {
         await loginWithExtension();
       } catch (e) {
-        setShowNsecInput(true); // Extension failed/rejected, fallback to NSEC
+        setShowNsecInput(true);
       }
     } else {
-      setShowNsecInput(true); // No extension, show NSEC input
+      setShowNsecInput(true);
     }
   };
 
   const handleNsecSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!nsec.startsWith("nsec1")) {
-      alert("Invalid format. Must start with nsec1...");
+      alert("Invalid format");
       return;
     }
     await loginWithNsec(nsec);
     setShowNsecInput(false);
   };
 
-  const handleAction = async () => {
-    if (!user) {
-      handleLoginStart();
-    } else {
-      if (merchant)
-        await publishCheckIn(
-          merchant.name,
-          merchant.id,
-          merchant.lat,
-          merchant.lon
-        );
+  const handleSubmitReport = async () => {
+    if (!merchant) return;
+
+    const statusEmoji =
+      paymentStatus === "success"
+        ? "✅"
+        : paymentStatus === "failed"
+          ? "❌"
+          : "👀";
+    const content = `${statusEmoji} ${comment}\n\nChecking in at ${merchant.name} ⚡ #SatsRover`;
+
+    const tags = [
+      ["t", "satsrover"],
+      ["t", "bitcoin"],
+      ["g", String(merchant.lat), String(merchant.lon)],
+      ["r", merchant.id],
+      ["l", "checkin", "satsrover"],
+      ["client", "satsrover"],
+      ["status", paymentStatus],
+      ["method", "lightning"],
+    ];
+
+    try {
+      await publishSignal(1, content, tags);
+      setIsReporting(false);
+      // Optimistic update would go here
+    } catch (e) {
+      console.error(e);
+      alert("Failed to publish");
     }
   };
+
+  const successCount = reviews.filter((r) =>
+    r.tags.some((t) => t[0] === "status" && t[1] === "success")
+  ).length;
 
   return (
     <div
       className={cn(
-        "fixed inset-x-0 bottom-0 z-30 transform transition-transform duration-300 ease-in-out bg-white rounded-t-2xl shadow-2xl p-6 pb-10 sm:max-w-md sm:left-1/2 sm:-translate-x-1/2",
+        "fixed inset-x-0 bottom-0 z-40 transform transition-transform duration-300 ease-out",
         merchant ? "translate-y-0" : "translate-y-full"
       )}
     >
-      {merchant && (
-        <>
-          <div className="w-12 h-1.5 bg-gray-300 rounded-full mx-auto mb-4" />
+      {/* Neon Top Border */}
+      <div className="h-px w-full bg-linear-to-r from-transparent via-[#F7931A] to-transparent shadow-[0_0_10px_#F7931A]" />
 
-          {/* HEADER */}
-          <div className="flex justify-between items-start mb-4">
-            <div>
-              <h2 className="text-xl font-bold text-gray-900">
-                {merchant.name}
-              </h2>
-              <div className="flex items-center text-gray-500 text-sm mt-1">
-                <MapPin className="w-4 h-4 mr-1" />
-                <span className="capitalize">
-                  {merchant.category.replace("_", " ")}
-                </span>
+      <div className="bg-[#050505] border-t border-white/10 pb-10 pt-4 px-6 shadow-2xl min-h-[50vh] max-h-[85vh] overflow-y-auto font-mono text-gray-200">
+        {/* Drag Handle */}
+        <div className="w-12 h-1 bg-white/20 rounded-full mx-auto mb-6" />
+
+        {merchant && (
+          <>
+            {/* Header Section */}
+            <div className="flex justify-between items-start mb-2">
+              <div>
+                <h2 className="text-2xl font-bold text-white tracking-tight uppercase">
+                  {merchant.name}
+                </h2>
+                <div className="flex items-center text-bitcoin text-xs mt-1 uppercase tracking-widest font-bold">
+                  <MapPin className="w-3 h-3 mr-1" />
+                  <span>{merchant.category.replace("_", " ")}</span>
+                </div>
               </div>
-            </div>
-            <button
-              onClick={onClose}
-              className="p-2 bg-gray-100 rounded-full hover:bg-gray-200"
-            >
-              <X className="w-5 h-5 text-gray-600" />
-            </button>
-          </div>
-
-          {/* BADGES */}
-          <div className="flex flex-wrap gap-2 mb-6">
-            {merchant.tags["payment:lightning"] === "yes" && (
-              <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800">
-                <Zap className="w-3 h-3 mr-1 fill-yellow-500 text-yellow-500" />{" "}
-                Lightning
-              </span>
-            )}
-            {merchant.tags["currency:XBT"] === "yes" && (
-              <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-800">
-                <Bitcoin className="w-3 h-3 mr-1 fill-orange-500 text-orange-500" />{" "}
-                On-Chain
-              </span>
-            )}
-          </div>
-
-          {/* ACTION AREA */}
-          <div className="grid grid-cols-2 gap-3 mb-6">
-            {/* If Showing Login Input */}
-            {showNsecInput && !user ? (
-              <form
-                onSubmit={handleNsecSubmit}
-                className="col-span-2 bg-gray-50 p-3 rounded-xl border border-gray-200"
+              <button
+                onClick={onClose}
+                className="p-2 hover:bg-white/10 rounded-full transition-colors text-gray-500 hover:text-white"
               >
-                <div className="flex justify-between items-center mb-2">
-                  <label className="text-xs font-bold text-gray-500 uppercase">
-                    Travel Mode Login
-                  </label>
-                  <button type="button" onClick={() => setShowNsecInput(false)}>
-                    <X className="w-4 h-4 text-gray-400" />
-                  </button>
+                <X className="w-6 h-6" />
+              </button>
+            </div>
+
+            {/* Signal Strength Indicator */}
+            <div className="mb-6 flex items-center">
+              {successCount > 0 ? (
+                <div className="inline-flex items-center gap-2 text-matrix text-[10px] border border-matrix/30 bg-matrix/5 px-3 py-1.5 rounded uppercase tracking-widest shadow-[0_0_8px_rgba(0,255,65,0.1)]">
+                  <Activity className="w-3 h-3" />
+                  <span className="font-bold">
+                    Signal: Verified ({successCount})
+                  </span>
                 </div>
-                <div className="relative">
-                  <input
-                    type={showSecret ? "text" : "password"}
-                    placeholder="nsec1..."
-                    className="w-full text-sm p-2 pr-10 border rounded-md focus:ring-2 focus:ring-purple-500 outline-none"
-                    value={nsec}
-                    onChange={(e) => setNsec(e.target.value)}
-                  />
-                  <button
-                    type="button"
-                    className="absolute right-2 top-2.5 text-gray-400"
-                    onClick={() => setShowSecret(!showSecret)}
+              ) : (
+                <div className="inline-flex items-center gap-2 text-gray-500 text-[10px] border border-white/10 bg-white/5 px-3 py-1.5 rounded uppercase tracking-widest">
+                  <Signal className="w-3 h-3" />
+                  <span className="font-bold">No Signal Data</span>
+                </div>
+              )}
+            </div>
+
+            {/* Tags / Badges */}
+            <div className="flex flex-wrap gap-2 mb-8">
+              {merchant.tags["payment:lightning"] === "yes" && (
+                <span className="inline-flex items-center px-2 py-1 rounded border border-bitcoin/40 text-bitcoin text-[9px] font-bold uppercase tracking-wider bg-bitcoin/5">
+                  <Zap className="w-3 h-3 mr-1 fill-bitcoin" /> Lightning
+                </span>
+              )}
+              {merchant.tags["currency:XBT"] === "yes" && (
+                <span className="inline-flex items-center px-2 py-1 rounded border border-white/20 text-gray-400 text-[9px] font-bold uppercase tracking-wider bg-white/5">
+                  <Bitcoin className="w-3 h-3 mr-1" /> On-Chain
+                </span>
+              )}
+            </div>
+
+            {/* MAIN ACTION AREA */}
+            <div className="mb-8 p-1 bg-white/5 rounded-xl border border-white/5">
+              {session.type === "anon" ? (
+                // 1. LOGIN REQUIRED
+                showNsecInput ? (
+                  <form
+                    onSubmit={handleNsecSubmit}
+                    className="p-4 animate-in fade-in"
                   >
-                    {showSecret ? (
-                      <EyeOff className="w-4 h-4" />
-                    ) : (
-                      <Eye className="w-4 h-4" />
-                    )}
-                  </button>
-                </div>
-                <button
-                  type="submit"
-                  className="w-full mt-2 bg-purple-600 text-white text-xs font-bold py-2 rounded-md hover:bg-purple-700"
-                >
-                  Connect Key
-                </button>
-                <p className="text-[10px] text-red-500 mt-2 leading-tight">
-                  ⚠️ <strong>Security Warning:</strong> Only paste your nsec if
-                  you trust this device.
-                </p>
-              </form>
-            ) : (
-              // Normal Buttons
-              <>
-                <button
-                  onClick={handleAction}
-                  className="flex items-center justify-center px-4 py-3 border border-transparent text-sm font-medium rounded-xl text-white bg-purple-600 hover:bg-purple-700 shadow-sm transition-all active:scale-95"
-                >
-                  {user ? (
-                    <>
-                      <User className="w-4 h-4 mr-2" /> Check In ⚡
-                    </>
-                  ) : (
-                    <>
-                      <KeyRound className="w-4 h-4 mr-2" /> Login
-                    </>
-                  )}
-                </button>
-                <a
-                  href={`https://www.google.com/maps/dir/?api=1&destination=${merchant.lat},${merchant.lon}`}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="flex items-center justify-center px-4 py-3 border border-gray-200 text-sm font-medium rounded-xl text-gray-700 bg-white hover:bg-gray-50 shadow-sm"
-                >
-                  <Navigation className="w-4 h-4 mr-2" /> Navigate
-                </a>
-              </>
-            )}
-          </div>
-
-          {/* REVIEWS LIST */}
-          <div className="border-t border-gray-100 pt-4">
-            <h3 className="text-sm font-semibold text-gray-900 mb-3">
-              Community Trust ⚡
-            </h3>
-            {loadingReviews ? (
-              <div className="text-xs text-gray-400 italic">
-                Syncing with Nostr...
-              </div>
-            ) : reviews.length === 0 ? (
-              <div className="text-xs text-gray-400">
-                No check-ins yet. Be the first! 🚀
-              </div>
-            ) : (
-              <div className="space-y-3 max-h-40 overflow-y-auto">
-                {reviews.map((note) => {
-                  const profile = profiles[note.pubkey];
-                  const name =
-                    profile?.name ||
-                    profile?.displayName ||
-                    note.pubkey.slice(0, 8);
-                  const image = profile?.image;
-
-                  return (
-                    <div
-                      key={note.id}
-                      className="bg-gray-50 p-3 rounded-lg text-sm"
-                    >
-                      <div className="flex items-center gap-2 mb-1">
-                        {image ? (
-                          // eslint-disable-next-line @next/next/no-img-element
-                          <img
-                            src={image}
-                            alt={name}
-                            className="w-6 h-6 rounded-full object-cover border border-gray-200"
-                          />
-                        ) : (
-                          <div className="w-6 h-6 bg-purple-200 rounded-full flex items-center justify-center text-[10px] text-purple-700 font-bold">
-                            {name.slice(0, 2).toUpperCase()}
-                          </div>
-                        )}
-                        <span className="text-xs font-bold text-gray-700">
-                          {name}
-                        </span>
-                        <span className="text-[10px] text-gray-400 ml-auto">
-                          {new Date(
-                            note.created_at! * 1000
-                          ).toLocaleDateString()}
-                        </span>
-                      </div>
-                      <p className="text-gray-700 line-clamp-2 pl-8">
-                        {note.content
-                          .replace(/Checking in at .* ⚡ #SatsRover/, "")
-                          .trim() || "Checked in ⚡"}
-                      </p>
+                    <div className="flex justify-between items-center mb-4">
+                      <label className="text-[10px] font-bold text-bitcoin uppercase tracking-widest">
+                        Manual Uplink
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => setShowNsecInput(false)}
+                      >
+                        <X className="w-4 h-4 text-gray-500 hover:text-white" />
+                      </button>
                     </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        </>
-      )}
+                    <div className="relative mb-3">
+                      <input
+                        type={showSecret ? "text" : "password"}
+                        placeholder="nsec1..."
+                        className="w-full bg-black text-sm text-white p-3 pr-10 border border-white/20 rounded focus:border-bitcoin focus:outline-none transition-colors font-mono"
+                        value={nsec}
+                        onChange={(e) => setNsec(e.target.value)}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowSecret(!showSecret)}
+                        className="absolute right-3 top-3.5 text-gray-500 hover:text-white"
+                      >
+                        {showSecret ? (
+                          <EyeOff className="w-4 h-4" />
+                        ) : (
+                          <Eye className="w-4 h-4" />
+                        )}
+                      </button>
+                    </div>
+                    <button
+                      type="submit"
+                      className="w-full bg-bitcoin text-black text-xs font-bold py-3 rounded uppercase tracking-widest hover:brightness-110"
+                    >
+                      Authenticate
+                    </button>
+                  </form>
+                ) : (
+                  <button
+                    onClick={handleLoginStart}
+                    className="w-full py-6 flex flex-col items-center justify-center gap-2 group"
+                  >
+                    <KeyRound className="w-6 h-6 text-gray-500 group-hover:text-bitcoin transition-colors" />
+                    <span className="text-xs uppercase tracking-widest font-bold text-gray-400 group-hover:text-white">
+                      Login to Broadcast
+                    </span>
+                  </button>
+                )
+              ) : !isReporting ? (
+                // 2. ACTIONS (LOGGED IN)
+                <div className="grid grid-cols-2 gap-1">
+                  <button
+                    onClick={() => setIsReporting(true)}
+                    className="bg-bitcoin text-black font-bold py-4 rounded-lg flex items-center justify-center gap-2 hover:brightness-110 transition-all uppercase tracking-wide text-xs"
+                  >
+                    <Zap className="w-4 h-4 fill-black" /> Report Status
+                  </button>
+                  <a
+                    href={`https://www.google.com/maps/dir/?api=1&destination=${merchant.lat},${merchant.lon}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="bg-black/40 text-gray-300 font-bold py-4 rounded-lg flex items-center justify-center gap-2 hover:bg-white/10 transition-all uppercase tracking-wide text-xs"
+                  >
+                    <Navigation className="w-4 h-4" /> Navigate
+                  </a>
+                </div>
+              ) : (
+                // 3. REPORTING FORM
+                <div className="p-4 animate-in zoom-in-95">
+                  <h4 className="text-xs font-bold text-gray-400 mb-4 uppercase tracking-widest text-center">
+                    Confirm Payment Status
+                  </h4>
+
+                  <div className="flex gap-2 mb-4">
+                    <button
+                      onClick={() => setPaymentStatus("success")}
+                      className={cn(
+                        "flex-1 py-3 rounded border flex flex-col items-center gap-1 transition-all",
+                        paymentStatus === "success"
+                          ? "bg-matrix/10 border-matrix text-matrix"
+                          : "bg-black border-white/10 text-gray-500 hover:border-white/30"
+                      )}
+                    >
+                      <ThumbsUp className="w-4 h-4" />{" "}
+                      <span className="text-[9px] font-bold uppercase">
+                        Worked
+                      </span>
+                    </button>
+                    <button
+                      onClick={() => setPaymentStatus("failed")}
+                      className={cn(
+                        "flex-1 py-3 rounded border flex flex-col items-center gap-1 transition-all",
+                        paymentStatus === "failed"
+                          ? "bg-signal-red/10 border-signal-red text-signal-red"
+                          : "bg-black border-white/10 text-gray-500 hover:border-white/30"
+                      )}
+                    >
+                      <ThumbsDown className="w-4 h-4" />{" "}
+                      <span className="text-[9px] font-bold uppercase">
+                        Failed
+                      </span>
+                    </button>
+                    <button
+                      onClick={() => setPaymentStatus("did_not_try")}
+                      className={cn(
+                        "flex-1 py-3 rounded border flex flex-col items-center gap-1 transition-all",
+                        paymentStatus === "did_not_try"
+                          ? "bg-white/10 border-white text-white"
+                          : "bg-black border-white/10 text-gray-500 hover:border-white/30"
+                      )}
+                    >
+                      <Meh className="w-4 h-4" />{" "}
+                      <span className="text-[9px] font-bold uppercase">
+                        No Try
+                      </span>
+                    </button>
+                  </div>
+
+                  <textarea
+                    className="w-full p-3 bg-black text-sm text-gray-300 border border-white/20 rounded mb-4 h-24 resize-none focus:outline-none focus:border-bitcoin font-mono placeholder:text-gray-700"
+                    placeholder="Transmission details (optional)..."
+                    value={comment}
+                    onChange={(e) => setComment(e.target.value)}
+                  />
+
+                  <div className="flex gap-2">
+                    <button
+                      onClick={handleSubmitReport}
+                      className="flex-1 bg-bitcoin text-black font-bold py-3 rounded text-xs uppercase tracking-widest hover:brightness-110"
+                    >
+                      Transmit Signal
+                    </button>
+                    <button
+                      onClick={() => setIsReporting(false)}
+                      className="px-4 border border-white/20 text-gray-400 font-bold py-3 rounded text-xs uppercase tracking-widest hover:bg-white/5"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* FEED SECTION */}
+            <div className="border-t border-white/10 pt-6">
+              <h3 className="text-[10px] font-bold text-gray-500 uppercase tracking-[0.2em] mb-4">
+                Signal Feed
+              </h3>
+
+              {loadingReviews ? (
+                <div className="text-xs text-bitcoin animate-pulse font-mono">
+                  Scanning relays for telemetry...
+                </div>
+              ) : reviews.length === 0 ? (
+                <div className="text-xs text-gray-600 font-mono">
+                  No signals detected in this sector.
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {reviews.map((note) => {
+                    const profile = profiles[note.pubkey];
+                    const name =
+                      profile?.name ||
+                      profile?.displayName ||
+                      note.pubkey.slice(0, 8);
+                    const image = profile?.image;
+
+                    const statusTag = note.tags.find(
+                      (t) => t[0] === "status"
+                    )?.[1];
+                    const isSuccess = statusTag === "success";
+                    const isFail = statusTag === "failed";
+
+                    return (
+                      <div
+                        key={note.id}
+                        className="bg-white/5 border border-white/5 p-3 rounded hover:border-white/10 transition-colors"
+                      >
+                        <div className="flex items-center gap-3 mb-2">
+                          {image ? (
+                            // eslint-disable-next-line @next/next/no-img-element
+                            <img
+                              src={image}
+                              alt={name}
+                              className="w-6 h-6 rounded-full object-cover grayscale opacity-80"
+                            />
+                          ) : (
+                            <div className="w-6 h-6 bg-white/10 rounded-full flex items-center justify-center text-[8px] text-gray-400 font-bold">
+                              {name.slice(0, 2).toUpperCase()}
+                            </div>
+                          )}
+                          <span className="font-bold text-gray-300 text-xs truncate max-w-37.5">
+                            {name}
+                          </span>
+                          <span className="text-[9px] text-gray-600 ml-auto font-mono">
+                            {new Date(
+                              note.created_at! * 1000
+                            ).toLocaleDateString()}
+                          </span>
+                        </div>
+                        <div className="flex gap-2 items-start">
+                          {isSuccess && (
+                            <Zap className="w-3 h-3 text-matrix mt-0.5 shrink-0" />
+                          )}
+                          {isFail && (
+                            <X className="w-3 h-3 text-signal-red mt-0.5 shrink-0" />
+                          )}
+                          <p className="text-gray-400 text-xs leading-relaxed wrap-break-word w-full">
+                            {note.content
+                              .replace(/Checking in at .* ⚡ #SatsRover/, "")
+                              .replace(/✅|❌|👀/, "")
+                              .trim()}
+                          </p>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </>
+        )}
+      </div>
     </div>
   );
 }
