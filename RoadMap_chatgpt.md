@@ -201,3 +201,5 @@ If you want, I can:
 - Help you frame this roadmap for **Fold / hiring managers**
 
 You’re building something _real_. This is how it becomes inevitable.
+
+satsrover nsec: nsec1wk3sghsw0cd38tdhtj4c5szp64r6c2j49xr0qeukj40cd0tjyklswxyt74

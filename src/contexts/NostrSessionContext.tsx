@@ -14,8 +14,15 @@ interface NostrSessionContextValue {
   session: NostrSession;
   capabilities: SessionCapabilities;
   loginWithExtension: () => Promise<void>;
-  loginWithNsec: (nsec: string) => Promise<void>;
-  signup: () => Promise<string | undefined>; // ✅ Added Signup
+  loginWithNsec: (nsec: string, remember?: boolean) => Promise<void>;
+  signup: (
+    remember?: boolean
+  ) => Promise<{ nsec: string; user: any } | undefined>;
+  updateProfile: (
+    name: string,
+    about: string,
+    picture: string
+  ) => Promise<void>; // ✅ Added Profile Update
   logout: () => void;
   publishSignal: (
     kind: number,
@@ -49,7 +56,8 @@ export function NostrSessionProvider({
         capabilities,
         loginWithExtension: nostr.loginWithExtension,
         loginWithNsec: nostr.loginWithNsec,
-        signup: nostr.signup, // ✅ Exposed
+        signup: nostr.signup,
+        updateProfile: nostr.updateProfile,
         logout: nostr.logout,
         publishSignal: nostr.publishSignal,
       }}

@@ -7,8 +7,8 @@ import {
   Wallet,
   X,
   User,
-  Fingerprint,
   LogIn,
+  Activity,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useSession } from "@/contexts/NostrSessionContext";
@@ -20,7 +20,9 @@ export type CommandView =
   | "hub"
   | "earn"
   | "manifesto"
-  | "auth";
+  | "auth"
+  | "activity"
+  | "sidebar";
 
 interface CommandBarProps {
   balance: number | null;
@@ -28,6 +30,7 @@ interface CommandBarProps {
   view: CommandView;
   currentHub: string;
   onSetView: (v: CommandView) => void;
+  onToggleSidebar: () => void;
 }
 
 export default function FloatingCommandBar({
@@ -36,15 +39,29 @@ export default function FloatingCommandBar({
   view,
   currentHub,
   onSetView,
+  onToggleSidebar,
 }: CommandBarProps) {
   const { session } = useSession();
 
+  const handleCenterClick = () => {
+    if (session.type === "anon") {
+      onSetView("auth");
+    } else {
+      onToggleSidebar(); // ✅ OPEN SIDEBAR IF LOGGED IN
+    }
+  };
+
   return (
     <div className="absolute bottom-8 left-1/2 -translate-x-1/2 z-30 flex flex-col items-center gap-4 w-full max-w-sm px-4">
-      {/* EXPANDED MENU */}
+      {/* 1. EXPANDED MENU */}
       {view === "menu" && (
         <div className="flex gap-3 animate-in slide-in-from-bottom-4 fade-in duration-200">
           <MenuButton icon={Map} label="HUB" onClick={() => onSetView("hub")} />
+          <MenuButton
+            icon={Activity}
+            label="FEED"
+            onClick={() => onSetView("activity")}
+          />
           <MenuButton
             icon={Wallet}
             label="WALLET"
@@ -56,18 +73,16 @@ export default function FloatingCommandBar({
             label="EARN"
             onClick={() => onSetView("earn")}
           />
-          <MenuButton
-            icon={Fingerprint}
-            label="ABOUT"
-            onClick={() => onSetView("manifesto")}
-          />
         </div>
       )}
 
-      {/* MAIN HUD BAR */}
+      {/* 2. MAIN HUD BAR */}
       <div className="flex items-center justify-between w-full max-w-85 h-14 pl-4 pr-2 bg-[#121212]/90 backdrop-blur-xl border border-white/10 rounded-full shadow-2xl shadow-black/50 transition-all">
-        {/* LEFT: WALLET STATUS (Read Only) */}
-        <div className="flex items-center gap-3 w-1/3">
+        {/* LEFT: WALLET */}
+        <button
+          onClick={() => onSetView("wallet")}
+          className="flex items-center gap-3 w-1/3 hover:opacity-80 transition-opacity text-left"
+        >
           <div
             className={cn(
               "p-1.5 rounded-full",
@@ -84,25 +99,33 @@ export default function FloatingCommandBar({
             />
           </div>
           <div className="flex flex-col items-start overflow-hidden">
-            <span className="font-mono text-xs font-bold text-white tracking-tight truncate w-full text-left">
+            <span className="font-mono text-xs font-bold text-white tracking-tight truncate w-full">
               {balance !== null ? balance.toLocaleString() : "---"}
             </span>
           </div>
-        </div>
+        </button>
 
-        {/* CENTER: IDENTITY (Interactive) */}
+        {/* CENTER: IDENTITY / SIDEBAR TRIGGER */}
         <button
-          onClick={() => onSetView("auth")}
+          onClick={handleCenterClick} // ✅ FIXED HANDLER
           className="flex items-center justify-center w-1/3 h-full border-l border-r border-white/5 px-2 hover:bg-white/5 transition-colors group cursor-pointer"
         >
           {session.type !== "anon" ? (
-            <div className="flex items-center gap-2 text-matrix animate-pulse-slow">
-              <User className="w-3 h-3" />
-              <span className="font-mono text-[10px] font-bold truncate max-w-17.5">
-                {session.user?.profile?.name || session.pubkey?.slice(0, 6)}
-              </span>
-            </div>
+            // ✅ LOGGED IN: Avatar Only
+            session.user?.profile?.image ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={session.user.profile.image}
+                className="w-8 h-8 rounded-full border border-[#00FF41]/50 shadow-[0_0_10px_rgba(0,255,65,0.2)] object-cover bg-gray-800"
+                alt="Me"
+              />
+            ) : (
+              <div className="w-8 h-8 rounded-full bg-[#00FF41]/10 border border-[#00FF41]/50 flex items-center justify-center text-[#00FF41] shadow-[0_0_10px_rgba(0,255,65,0.2)]">
+                <User className="w-4 h-4" />
+              </div>
+            )
           ) : (
+            // LOGGED OUT: Login Text
             <div className="flex items-center gap-2 text-gray-500 group-hover:text-white transition-colors">
               <LogIn className="w-3 h-3" />
               <span className="font-mono text-[10px] uppercase tracking-widest">
@@ -117,6 +140,9 @@ export default function FloatingCommandBar({
           onClick={() => onSetView(view === "idle" ? "menu" : "idle")}
           className="flex items-center justify-end gap-3 w-1/3 pr-2 group"
         >
+          <span className="font-mono text-[10px] font-bold text-gray-600 uppercase hidden sm:block">
+            CMD
+          </span>
           <div
             className={cn(
               "p-2 rounded-full transition-colors",
@@ -137,6 +163,7 @@ export default function FloatingCommandBar({
   );
 }
 
+// ... MenuButton component ...
 function MenuButton({ icon: Icon, label, onClick, active }: any) {
   return (
     <button

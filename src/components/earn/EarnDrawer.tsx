@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { Trophy, Map, Zap, X, Loader2, Shield, Target } from "lucide-react";
 import { useSession } from "@/contexts/NostrSessionContext";
 import { cn } from "@/lib/utils";
+import { Share2 } from "lucide-react";
 
 interface EarnDrawerProps {
   isOpen: boolean;
@@ -43,7 +44,22 @@ export default function EarnDrawer({ isOpen, onClose }: EarnDrawerProps) {
         : rankLevel === 3
           ? "NODE RUNNER"
           : "CYPHERPUNK";
-
+  // NEW: Share Function
+  const handleShare = () => {
+    const text = `I'm exploring the sovereign web with #SatsRover 🌍⚡\n\nRank: ${rankTitle}\nCheck-ins: ${checkInCount}\n\nJoin the hunt: https://satsrover.vercel.app`;
+    if (navigator.share) {
+      navigator
+        .share({
+          title: "SatsRover Status",
+          text,
+          url: "https://satsrover.vercel.app",
+        })
+        .catch(console.error);
+    } else {
+      navigator.clipboard.writeText(text);
+      alert("Stats copied to clipboard! Paste it on Nostr.");
+    }
+  };
   return (
     <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center pointer-events-none">
       <div
@@ -56,7 +72,7 @@ export default function EarnDrawer({ isOpen, onClose }: EarnDrawerProps) {
         <div className="flex justify-between items-center mb-6 border-b border-white/10 pb-4">
           <h2 className="text-lg font-bold flex items-center gap-2 text-bitcoin">
             <Trophy className="w-5 h-5" />
-            PROOF_OF_WORK
+            PROOF_OF_PRESENCE
           </h2>
           <button
             onClick={onClose}
@@ -131,6 +147,16 @@ export default function EarnDrawer({ isOpen, onClose }: EarnDrawerProps) {
                 />
               </div>
             </div>
+            {/* Add this button below the Missions List */}
+            <button
+              onClick={handleShare}
+              className="w-full mt-6 py-4 border border-bitcoin/30 bg-bitcoin/5 text-bitcoin rounded-xl flex items-center justify-center gap-2 hover:bg-bitcoin/10 transition-all group"
+            >
+              <Share2 className="w-4 h-4 group-hover:scale-110 transition-transform" />
+              <span className="text-xs font-bold uppercase tracking-widest">
+                Share Protocol Status
+              </span>
+            </button>
           </div>
         )}
       </div>
