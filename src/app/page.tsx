@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import MapView from "@/components/map/MapView";
 import WalletDrawer from "@/components/wallet/WalletDrawer";
 import HubDrawer from "@/components/hub/HubDrawer";
@@ -11,15 +11,17 @@ import Sidebar from "@/components/layout/Sidebar";
 import FloatingCommandBar, {
   CommandView,
 } from "@/components/ui/FloatingCommandBar";
-import { useNostr } from "@/hooks/use-nostr";
+import { useSession } from "@/contexts/NostrSessionContext"; // ✅ CORRECT IMPORT
 import { useLightningEngine } from "@/hooks/use-lightning-engine";
 
 export default function Home() {
-  const { ndk } = useNostr();
+  // ✅ USE SESSION CONTEXT (Single Source of Truth)
+  const { ndk, session } = useSession();
+
+  // Pass the NDK instance from context to the wallet engine
   const { status, balance, ignite, disconnect, payInvoice } =
     useLightningEngine(ndk);
 
-  // UI State
   const [view, setView] = useState<CommandView>("idle");
   const [currentHub, setCurrentHub] = useState("Global");
   const [flyToCoords, setFlyToCoords] = useState<{
@@ -34,6 +36,13 @@ export default function Home() {
     setView("idle");
   };
 
+  // ✅ HARD GUARD: If user logs in while AuthDrawer is open, close it immediately
+  useEffect(() => {
+    if (session.type !== "anon" && view === "auth") {
+      setView("idle");
+    }
+  }, [session.type, view]);
+
   return (
     <main className="fixed inset-0 flex flex-col bg-[#050505] text-white font-mono overflow-hidden">
       {/* 1. MAP LAYER */}
@@ -47,29 +56,28 @@ export default function Home() {
         />
       </div>
 
-      {/* 2. HUD LAYER (Floating Command Bar) */}
+      {/* 2. HUD LAYER */}
       <FloatingCommandBar
         balance={balance}
         status={status}
         view={view}
         currentHub={currentHub}
         onSetView={setView}
-        onToggleSidebar={() => setIsSidebarOpen(true)} // ✅ Connects Right Button to Sidebar
+        onToggleSidebar={() => setIsSidebarOpen(true)}
       />
 
-      {/* 3. NAVIGATION LAYER (Sidebar) */}
+      {/* 3. NAVIGATION LAYER */}
       <Sidebar
         isOpen={isSidebarOpen}
         onClose={() => setIsSidebarOpen(false)}
         onNavigate={(v) => {
           setView(v as CommandView);
-          setIsSidebarOpen(false); // Close sidebar when navigating to a drawer
+          setIsSidebarOpen(false);
         }}
       />
 
-      {/* 4. INTERACTION LAYERS (Drawers) */}
+      {/* 4. INTERACTION LAYERS */}
 
-      {/* Wallet (NWC) */}
       <WalletDrawer
         isOpen={view === "wallet"}
         onClose={() => setView("idle")}
@@ -80,30 +88,28 @@ export default function Home() {
         onPay={payInvoice}
       />
 
-      {/* Hub Selector */}
       <HubDrawer
         isOpen={view === "hub"}
         onClose={() => setView("idle")}
         onSelect={handleHubSelect}
       />
 
-      {/* Proof of Presence (Stats) */}
       <EarnDrawer isOpen={view === "earn"} onClose={() => setView("idle")} />
 
-      {/* Network Pulse (Feed) */}
       <ActivityDrawer
         isOpen={view === "activity"}
         onClose={() => setView("idle")}
       />
 
-      {/* Manifesto */}
       <ManifestoDrawer
         isOpen={view === "manifesto"}
         onClose={() => setView("idle")}
       />
 
-      {/* Identity / Login */}
-      <AuthDrawer isOpen={view === "auth"} onClose={() => setView("idle")} />
+      {/* ✅ HARD GUARD: AuthDrawer ONLY renders if Anon */}
+      {session.type === "anon" && (
+        <AuthDrawer isOpen={view === "auth"} onClose={() => setView("idle")} />
+      )}
     </main>
   );
 }

@@ -46,12 +46,12 @@ export function useNostr() {
     init();
   }, []);
 
-  // Restore session only if it exists in storage
+  // 1b. Restore Session
   useEffect(() => {
     if (ndk && session.type === "anon") {
       const storedNsec = loadNsec();
       if (storedNsec) {
-        // Auto-login implies we remembered it
+        // If it's in storage, the user explicitly wanted to remember it
         loginWithNsec(storedNsec, true).catch(() => clearNsec());
       }
     }
@@ -66,7 +66,6 @@ export function useNostr() {
     setSession({ type: "nip07", pubkey: user.pubkey, user });
   };
 
-  // ✅ MODIFIED: Added 'remember' flag
   const loginWithNsec = async (nsec: string, remember: boolean = false) => {
     if (!ndk) return;
     try {
@@ -82,7 +81,7 @@ export function useNostr() {
       if (remember) {
         storeNsec(nsec);
       } else {
-        clearNsec(); // Ensure we don't persist if they unchecked it
+        clearNsec();
       }
 
       setSession({ type: "local_nsec", pubkey: user.pubkey, user });
@@ -92,7 +91,6 @@ export function useNostr() {
     }
   };
 
-  // ✅ MODIFIED: Added 'remember' flag
   const signup = async (remember: boolean = false) => {
     if (!ndk) return;
 
@@ -106,6 +104,8 @@ export function useNostr() {
 
     if (remember) {
       storeNsec(nsec);
+    } else {
+      clearNsec();
     }
 
     setSession({ type: "local_nsec", pubkey: user.pubkey, user });
@@ -119,24 +119,29 @@ export function useNostr() {
     picture: string
   ) => {
     if (!ndk || !session.user) return;
+
+    // Merge Strategy: Don't wipe existing fields
     await session.user.fetchProfile();
     const existing = session.user.profile || {};
+
     session.user.profile = {
       ...existing,
       name: name || existing.name,
       about: about || existing.about,
       image: picture || existing.image,
     };
+
     await session.user.publish();
     setSession((prev) => ({ ...prev, user: session.user }));
   };
 
   const logout = () => {
     if (ndk) ndk.signer = undefined;
-    clearNsec();
-    setSession({ type: "anon" });
+    clearNsec(); // ✅ Wipe storage
+    setSession({ type: "anon" }); // ✅ Reset state
   };
 
+  // ... publishSignal logic ...
   const publishSignal = async (
     kind: number,
     content: string,

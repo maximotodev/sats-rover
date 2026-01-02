@@ -33,25 +33,31 @@ export default function AuthDrawer({ isOpen, onClose }: AuthDrawerProps) {
   const [copied, setCopied] = useState(false);
   const [loading, setLoading] = useState(false);
 
-  // ✅ NEW: Persist Toggle
+  // ✅ LOGIC: Default True for Signup (UX), Default False for Login (Security)
   const [rememberMe, setRememberMe] = useState(true);
 
+  // Hard Guard: If logged in, this component should render nothing (or close itself)
+  useEffect(() => {
+    if (session.type !== "anon") onClose();
+  }, [session.type, onClose]);
+
+  // Reset on open
   useEffect(() => {
     if (isOpen) {
-      // If already logged in, show menu or close?
-      // Actually, if logged in, this drawer shouldn't typically open via the center button,
-      // but if it does (e.g. from Sidebar "Switch Account"), we reset.
       setStep("menu");
       setNsecInput("");
       setCreatedNsec(null);
+      setFormData({ name: "", about: "", picture: "" });
     }
   }, [isOpen]);
 
-  if (!isOpen) return null;
+  if (!isOpen || session.type !== "anon") return null;
 
+  // Handlers
   const handleStartSignup = async () => {
     setLoading(true);
-    const result = await signup(rememberMe); // Pass toggle
+    // Force Remember=True for new accounts to prevent immediate loss
+    const result = await signup(true);
     if (result) {
       setCreatedNsec(result.nsec);
       const randomAvatar = `https://api.dicebear.com/9.x/bottts-neutral/svg?seed=${result.user.pubkey}`;
@@ -71,10 +77,11 @@ export default function AuthDrawer({ isOpen, onClose }: AuthDrawerProps) {
   const handleNsecLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!nsecInput.startsWith("nsec1")) return alert("Invalid nsec");
-    await loginWithNsec(nsecInput, rememberMe); // Pass toggle
+    await loginWithNsec(nsecInput, rememberMe);
     onClose();
   };
 
+  // ... copyToClipboard same as before ...
   const copyToClipboard = () => {
     if (createdNsec) {
       navigator.clipboard.writeText(createdNsec);
@@ -96,11 +103,8 @@ export default function AuthDrawer({ isOpen, onClose }: AuthDrawerProps) {
             <KeyRound className="w-5 h-5" />
             NOSTR_IDENTITY
           </h2>
-          <button
-            onClick={onClose}
-            className="p-2 hover:bg-white/10 rounded-full text-gray-400"
-          >
-            <X className="w-5 h-5" />
+          <button onClick={onClose}>
+            <X className="w-5 h-5 text-gray-400" />
           </button>
         </div>
 
@@ -118,22 +122,6 @@ export default function AuthDrawer({ isOpen, onClose }: AuthDrawerProps) {
               <UserPlus className="w-5 h-5 opacity-50 group-hover:opacity-100 transition-opacity" />
             </button>
 
-            <div className="flex items-center justify-center gap-2 mb-4">
-              <input
-                type="checkbox"
-                id="remember"
-                checked={rememberMe}
-                onChange={(e) => setRememberMe(e.target.checked)}
-                className="accent-bitcoin w-4 h-4"
-              />
-              <label
-                htmlFor="remember"
-                className="text-xs text-gray-400 select-none cursor-pointer"
-              >
-                Keep me logged in
-              </label>
-            </div>
-
             <div className="flex items-center gap-4 my-4">
               <div className="h-px bg-white/10 flex-1" />
               <span className="text-[10px] text-gray-600 uppercase tracking-widest">
@@ -144,7 +132,10 @@ export default function AuthDrawer({ isOpen, onClose }: AuthDrawerProps) {
 
             <div className="grid grid-cols-2 gap-3">
               <button
-                onClick={() => setStep("login")}
+                onClick={() => {
+                  setStep("login");
+                  setRememberMe(false);
+                }}
                 className="py-4 bg-white/5 border border-white/10 rounded-xl hover:bg-white/10 transition-all flex flex-col items-center gap-2"
               >
                 <KeyRound className="w-5 h-5 text-gray-400" />
@@ -182,19 +173,19 @@ export default function AuthDrawer({ isOpen, onClose }: AuthDrawerProps) {
               />
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-3 bg-white/5 p-3 rounded-lg border border-white/5">
               <input
                 type="checkbox"
                 id="remember_login"
                 checked={rememberMe}
                 onChange={(e) => setRememberMe(e.target.checked)}
-                className="accent-bitcoin w-4 h-4"
+                className="accent-bitcoin w-4 h-4 cursor-pointer"
               />
               <label
                 htmlFor="remember_login"
-                className="text-xs text-gray-400 select-none cursor-pointer"
+                className="text-xs text-gray-300 cursor-pointer select-none"
               >
-                Keep me logged in
+                Stay logged in on this device
               </label>
             </div>
 
@@ -214,8 +205,9 @@ export default function AuthDrawer({ isOpen, onClose }: AuthDrawerProps) {
           </form>
         )}
 
-        {/* STEP 3: CREATE PROFILE */}
+        {/* ... (Create Profile & Backup Steps same as previous, omitted for brevity but include them!) ... */}
         {step === "create_profile" && (
+          // ... (Reuse previous code) ...
           <div className="space-y-6">
             <div className="text-center">
               <div className="w-24 h-24 mx-auto bg-white/5 rounded-full p-1 border-2 border-bitcoin relative overflow-hidden group">
@@ -230,7 +222,6 @@ export default function AuthDrawer({ isOpen, onClose }: AuthDrawerProps) {
                 Your Digital Self
               </p>
             </div>
-
             <div className="space-y-3">
               <input
                 type="text"
@@ -252,7 +243,6 @@ export default function AuthDrawer({ isOpen, onClose }: AuthDrawerProps) {
                 }
               />
             </div>
-
             <button
               onClick={handleSaveProfile}
               disabled={!formData.name || loading}
@@ -269,7 +259,6 @@ export default function AuthDrawer({ isOpen, onClose }: AuthDrawerProps) {
           </div>
         )}
 
-        {/* STEP 4: BACKUP */}
         {step === "backup" && (
           <div className="space-y-6 animate-in fade-in">
             <div className="bg-bitcoin/10 p-4 rounded-lg border border-bitcoin/30 text-center">
@@ -278,7 +267,6 @@ export default function AuthDrawer({ isOpen, onClose }: AuthDrawerProps) {
               </h3>
               <p className="text-xs text-gray-400">Welcome to the network.</p>
             </div>
-
             <div className="bg-red-500/5 border border-red-500/20 p-4 rounded-xl">
               <div className="flex items-center gap-2 text-red-500 mb-2">
                 <ShieldAlert className="w-4 h-4" />
@@ -308,7 +296,6 @@ export default function AuthDrawer({ isOpen, onClose }: AuthDrawerProps) {
                 </button>
               </div>
             </div>
-
             <button
               onClick={onClose}
               className="w-full py-4 bg-white/10 text-white font-bold rounded-lg text-sm uppercase tracking-widest hover:bg-white/20"
