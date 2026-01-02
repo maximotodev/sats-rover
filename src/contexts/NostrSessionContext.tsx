@@ -14,7 +14,9 @@ interface NostrSessionContextValue {
   session: NostrSession;
   capabilities: SessionCapabilities;
   loginWithExtension: () => Promise<void>;
+  // ✅ FIXED: Added remember optional param
   loginWithNsec: (nsec: string, remember?: boolean) => Promise<void>;
+  // ✅ FIXED: Added remember optional param
   signup: (
     remember?: boolean
   ) => Promise<{ nsec: string; user: any } | undefined>;
@@ -22,12 +24,16 @@ interface NostrSessionContextValue {
     name: string,
     about: string,
     picture: string
-  ) => Promise<void>; // ✅ Added Profile Update
+  ) => Promise<void>;
   logout: () => void;
   publishSignal: (
-    kind: number,
-    content: string,
-    tags: string[][]
+    merchantName: string,
+    merchantId: string,
+    lat: number,
+    lon: number,
+    paymentResult: "success" | "failed" | "did_not_try",
+    paymentMethod: "lightning" | "onchain" | "none",
+    comment: string
   ) => Promise<boolean>;
 }
 

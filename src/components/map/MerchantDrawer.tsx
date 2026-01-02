@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { Merchant } from "@/lib/types";
 import {
   X,
@@ -15,10 +15,14 @@ import {
   Meh,
   Activity,
   Signal,
+  Loader2,
+  AlertCircle,
+  CheckCircle2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useSession } from "@/contexts/NostrSessionContext";
 import { NDKEvent, NDKUserProfile } from "@nostr-dev-kit/ndk";
+import { calculateMerchantIntensity } from "@/lib/scoring";
 
 interface MerchantDrawerProps {
   merchant: Merchant | null;
@@ -39,7 +43,7 @@ export default function MerchantDrawer({
   const [profiles, setProfiles] = useState<ProfileMap>({});
   const [loadingReviews, setLoadingReviews] = useState(false);
 
-  // Login UI State (Fallback)
+  // Login UI State
   const [showNsecInput, setShowNsecInput] = useState(false);
   const [nsec, setNsec] = useState("");
   const [showSecret, setShowSecret] = useState(false);
@@ -51,6 +55,16 @@ export default function MerchantDrawer({
   >("success");
   const [comment, setComment] = useState("");
 
+  // UX State
+  const [isPublishing, setIsPublishing] = useState(false);
+  const [publishError, setPublishError] = useState<string | null>(null);
+
+  // Reliability Score
+  const [reliability, setReliability] = useState(0);
+
+  // Scroll Ref
+  const feedTopRef = useRef<HTMLDivElement>(null);
+
   // 1. Fetch Logic
   useEffect(() => {
     if (merchant && ndk) {
@@ -58,9 +72,9 @@ export default function MerchantDrawer({
       setIsReporting(false);
       setPaymentStatus("success");
       setComment("");
+      setPublishError(null);
 
-      // Manual fetch because fetchCheckIns helper might need updating to new hook style
-      // or we just inline the simple fetch here for clarity
+      // Fetch by place ID
       const filter = {
         kinds: [1],
         "#r": [merchant.id],
@@ -73,6 +87,9 @@ export default function MerchantDrawer({
           (a, b) => b.created_at! - a.created_at!
         );
         setReviews(notes);
+
+        const score = calculateMerchantIntensity(notes);
+        setReliability(score);
 
         if (notes.length > 0) {
           const uniquePubkeys = Array.from(new Set(notes.map((n) => n.pubkey)));
@@ -90,10 +107,11 @@ export default function MerchantDrawer({
       });
     } else {
       setReviews([]);
+      setReliability(0);
     }
   }, [merchant, ndk]);
 
-  // 2. Handlers
+  // Handlers
   const handleLoginStart = async () => {
     if (window.nostr) {
       try {
@@ -119,32 +137,59 @@ export default function MerchantDrawer({
   const handleSubmitReport = async () => {
     if (!merchant) return;
 
-    const statusEmoji =
-      paymentStatus === "success"
-        ? "✅"
-        : paymentStatus === "failed"
-          ? "❌"
-          : "👀";
-    const content = `${statusEmoji} ${comment}\n\nChecking in at ${merchant.name} ⚡ #SatsRover`;
+    setIsPublishing(true);
+    setPublishError(null);
 
-    const tags = [
-      ["t", "satsrover"],
-      ["t", "bitcoin"],
-      ["g", String(merchant.lat), String(merchant.lon)],
-      ["r", merchant.id],
-      ["l", "checkin", "satsrover"],
-      ["client", "satsrover"],
-      ["status", paymentStatus],
-      ["method", "lightning"],
-    ];
+    // 1. Publish to Network
+    const success = await publishSignal(
+      merchant.name,
+      merchant.id,
+      merchant.lat,
+      merchant.lon,
+      paymentStatus,
+      "lightning",
+      comment
+    );
 
-    try {
-      await publishSignal(1, content, tags);
+    setIsPublishing(false);
+
+    if (success) {
+      // 2. Optimistic UI Update (Show immediately without refetch)
+      const statusEmoji =
+        paymentStatus === "success"
+          ? "✅"
+          : paymentStatus === "failed"
+            ? "❌"
+            : "👀";
+      const optimisticNote = {
+        id: `opt-${Date.now()}`,
+        pubkey: session.pubkey || "unknown",
+        created_at: Math.floor(Date.now() / 1000),
+        content: `${statusEmoji} ${comment}`,
+        tags: [["status", paymentStatus]],
+      } as NDKEvent;
+
+      setReviews((prev) => [optimisticNote, ...prev]);
+
+      // Add current user profile to map if missing
+      if (session.user?.profile && session.pubkey) {
+        setProfiles((prev) => ({
+          ...prev,
+          [session.pubkey!]: session.user!.profile!,
+        }));
+      }
+
       setIsReporting(false);
-      // Optimistic update would go here
-    } catch (e) {
-      console.error(e);
-      alert("Failed to publish");
+
+      // Scroll to top
+      setTimeout(() => {
+        feedTopRef.current?.scrollIntoView({
+          behavior: "smooth",
+          block: "center",
+        });
+      }, 100);
+    } else {
+      setPublishError("Signal failed to reach relays. Please retry.");
     }
   };
 
@@ -174,7 +219,7 @@ export default function MerchantDrawer({
                 <h2 className="text-2xl font-bold text-white tracking-tight uppercase">
                   {merchant.name}
                 </h2>
-                <div className="flex items-center text-bitcoin text-xs mt-1 uppercase tracking-widest font-bold">
+                <div className="flex items-center text-[#F7931A] text-xs mt-1 uppercase tracking-widest font-bold">
                   <MapPin className="w-3 h-3 mr-1" />
                   <span>{merchant.category.replace("_", " ")}</span>
                 </div>
@@ -189,26 +234,31 @@ export default function MerchantDrawer({
 
             {/* Signal Strength Indicator */}
             <div className="mb-6 flex items-center">
-              {successCount > 0 ? (
-                <div className="inline-flex items-center gap-2 text-matrix text-[10px] border border-matrix/30 bg-matrix/5 px-3 py-1.5 rounded uppercase tracking-widest shadow-[0_0_8px_rgba(0,255,65,0.1)]">
+              {reliability >= 0.7 ? (
+                <div className="inline-flex items-center gap-2 text-[#00FF41] text-[10px] border border-[#00FF41]/30 bg-[#00FF41]/5 px-3 py-1.5 rounded uppercase tracking-widest shadow-[0_0_8px_rgba(0,255,65,0.1)]">
                   <Activity className="w-3 h-3" />
+                  <span className="font-bold">VERIFIED: HIGH CONFIDENCE</span>
+                </div>
+              ) : reliability >= 0.4 ? (
+                <div className="inline-flex items-center gap-2 text-[#F7931A] text-[10px] border border-[#F7931A]/30 bg-[#F7931A]/5 px-3 py-1.5 rounded uppercase tracking-widest">
+                  <Signal className="w-3 h-3" />
                   <span className="font-bold">
-                    Signal: Verified ({successCount})
+                    PARTIALLY VERIFIED ({successCount})
                   </span>
                 </div>
               ) : (
                 <div className="inline-flex items-center gap-2 text-gray-500 text-[10px] border border-white/10 bg-white/5 px-3 py-1.5 rounded uppercase tracking-widest">
                   <Signal className="w-3 h-3" />
-                  <span className="font-bold">No Signal Data</span>
+                  <span className="font-bold">UNVERIFIED SIGNAL</span>
                 </div>
               )}
             </div>
 
-            {/* Tags / Badges */}
+            {/* Badges */}
             <div className="flex flex-wrap gap-2 mb-8">
               {merchant.tags["payment:lightning"] === "yes" && (
-                <span className="inline-flex items-center px-2 py-1 rounded border border-bitcoin/40 text-bitcoin text-[9px] font-bold uppercase tracking-wider bg-bitcoin/5">
-                  <Zap className="w-3 h-3 mr-1 fill-bitcoin" /> Lightning
+                <span className="inline-flex items-center px-2 py-1 rounded border border-[#F7931A]/40 text-[#F7931A] text-[9px] font-bold uppercase tracking-wider bg-[#F7931A]/5">
+                  <Zap className="w-3 h-3 mr-1 fill-[#F7931A]" /> Lightning
                 </span>
               )}
               {merchant.tags["currency:XBT"] === "yes" && (
@@ -218,7 +268,7 @@ export default function MerchantDrawer({
               )}
             </div>
 
-            {/* MAIN ACTION AREA */}
+            {/* ACTION AREA */}
             <div className="mb-8 p-1 bg-white/5 rounded-xl border border-white/5">
               {session.type === "anon" ? (
                 // 1. LOGIN REQUIRED
@@ -228,7 +278,7 @@ export default function MerchantDrawer({
                     className="p-4 animate-in fade-in"
                   >
                     <div className="flex justify-between items-center mb-4">
-                      <label className="text-[10px] font-bold text-bitcoin uppercase tracking-widest">
+                      <label className="text-[10px] font-bold text-[#F7931A] uppercase tracking-widest">
                         Manual Uplink
                       </label>
                       <button
@@ -242,7 +292,7 @@ export default function MerchantDrawer({
                       <input
                         type={showSecret ? "text" : "password"}
                         placeholder="nsec1..."
-                        className="w-full bg-black text-sm text-white p-3 pr-10 border border-white/20 rounded focus:border-bitcoin focus:outline-none transition-colors font-mono"
+                        className="w-full bg-black text-sm text-white p-3 pr-10 border border-white/20 rounded focus:border-[#F7931A] focus:outline-none transition-colors font-mono"
                         value={nsec}
                         onChange={(e) => setNsec(e.target.value)}
                       />
@@ -260,7 +310,7 @@ export default function MerchantDrawer({
                     </div>
                     <button
                       type="submit"
-                      className="w-full bg-bitcoin text-black text-xs font-bold py-3 rounded uppercase tracking-widest hover:brightness-110"
+                      className="w-full bg-[#F7931A] text-black text-xs font-bold py-3 rounded uppercase tracking-widest hover:brightness-110"
                     >
                       Authenticate
                     </button>
@@ -270,7 +320,7 @@ export default function MerchantDrawer({
                     onClick={handleLoginStart}
                     className="w-full py-6 flex flex-col items-center justify-center gap-2 group"
                   >
-                    <KeyRound className="w-6 h-6 text-gray-500 group-hover:text-bitcoin transition-colors" />
+                    <KeyRound className="w-6 h-6 text-gray-500 group-hover:text-[#F7931A] transition-colors" />
                     <span className="text-xs uppercase tracking-widest font-bold text-gray-400 group-hover:text-white">
                       Login to Broadcast
                     </span>
@@ -281,7 +331,7 @@ export default function MerchantDrawer({
                 <div className="grid grid-cols-2 gap-1">
                   <button
                     onClick={() => setIsReporting(true)}
-                    className="bg-bitcoin text-black font-bold py-4 rounded-lg flex items-center justify-center gap-2 hover:brightness-110 transition-all uppercase tracking-wide text-xs"
+                    className="bg-[#F7931A] text-black font-bold py-4 rounded-lg flex items-center justify-center gap-2 hover:brightness-110 transition-all uppercase tracking-wide text-xs"
                   >
                     <Zap className="w-4 h-4 fill-black" /> Report Status
                   </button>
@@ -301,13 +351,20 @@ export default function MerchantDrawer({
                     Confirm Payment Status
                   </h4>
 
+                  {publishError && (
+                    <div className="mb-4 p-3 bg-red-900/20 border border-red-500/30 rounded text-red-400 text-xs flex items-center gap-2">
+                      <AlertCircle className="w-4 h-4 shrink-0" />
+                      {publishError}
+                    </div>
+                  )}
+
                   <div className="flex gap-2 mb-4">
                     <button
                       onClick={() => setPaymentStatus("success")}
                       className={cn(
                         "flex-1 py-3 rounded border flex flex-col items-center gap-1 transition-all",
                         paymentStatus === "success"
-                          ? "bg-matrix/10 border-matrix text-matrix"
+                          ? "bg-[#00FF41]/10 border-[#00FF41] text-[#00FF41]"
                           : "bg-black border-white/10 text-gray-500 hover:border-white/30"
                       )}
                     >
@@ -321,7 +378,7 @@ export default function MerchantDrawer({
                       className={cn(
                         "flex-1 py-3 rounded border flex flex-col items-center gap-1 transition-all",
                         paymentStatus === "failed"
-                          ? "bg-signal-red/10 border-signal-red text-signal-red"
+                          ? "bg-[#FF3B30]/10 border-[#FF3B30] text-[#FF3B30]"
                           : "bg-black border-white/10 text-gray-500 hover:border-white/30"
                       )}
                     >
@@ -347,8 +404,8 @@ export default function MerchantDrawer({
                   </div>
 
                   <textarea
-                    className="w-full p-3 bg-black text-sm text-gray-300 border border-white/20 rounded mb-4 h-24 resize-none focus:outline-none focus:border-bitcoin font-mono placeholder:text-gray-700"
-                    placeholder="Transmission details (optional)..."
+                    className="w-full p-3 bg-[#050505] text-sm text-gray-300 border border-white/20 rounded mb-4 h-24 resize-none focus:outline-none focus:border-[#F7931A] font-mono placeholder:text-gray-700"
+                    placeholder="Add intel (e.g. 'Terminal behind counter')..."
                     value={comment}
                     onChange={(e) => setComment(e.target.value)}
                   />
@@ -356,13 +413,20 @@ export default function MerchantDrawer({
                   <div className="flex gap-2">
                     <button
                       onClick={handleSubmitReport}
-                      className="flex-1 bg-bitcoin text-black font-bold py-3 rounded text-xs uppercase tracking-widest hover:brightness-110"
+                      disabled={isPublishing}
+                      className="flex-1 bg-[#F7931A] text-black font-bold py-3 rounded text-xs uppercase tracking-widest hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                     >
-                      Transmit Signal
+                      {isPublishing ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <Zap className="w-4 h-4 fill-black" />
+                      )}
+                      {isPublishing ? "Broadcasting..." : "Transmit Signal"}
                     </button>
                     <button
                       onClick={() => setIsReporting(false)}
-                      className="px-4 border border-white/20 text-gray-400 font-bold py-3 rounded text-xs uppercase tracking-widest hover:bg-white/5"
+                      disabled={isPublishing}
+                      className="px-4 border border-white/20 text-gray-400 font-bold py-3 rounded text-xs uppercase tracking-widest hover:bg-white/5 disabled:opacity-50"
                     >
                       Cancel
                     </button>
@@ -373,12 +437,12 @@ export default function MerchantDrawer({
 
             {/* FEED SECTION */}
             <div className="border-t border-white/10 pt-6">
+              <div ref={feedTopRef} /> {/* Scroll anchor */}
               <h3 className="text-[10px] font-bold text-gray-500 uppercase tracking-[0.2em] mb-4">
                 Signal Feed
               </h3>
-
               {loadingReviews ? (
-                <div className="text-xs text-bitcoin animate-pulse font-mono">
+                <div className="text-xs text-[#F7931A] animate-pulse font-mono">
                   Scanning relays for telemetry...
                 </div>
               ) : reviews.length === 0 ? (
@@ -404,7 +468,7 @@ export default function MerchantDrawer({
                     return (
                       <div
                         key={note.id}
-                        className="bg-white/5 border border-white/5 p-3 rounded hover:border-white/10 transition-colors"
+                        className="bg-white/5 border border-white/5 p-3 rounded hover:border-white/10 transition-colors animate-in fade-in slide-in-from-top-2"
                       >
                         <div className="flex items-center gap-3 mb-2">
                           {image ? (
@@ -430,10 +494,10 @@ export default function MerchantDrawer({
                         </div>
                         <div className="flex gap-2 items-start">
                           {isSuccess && (
-                            <Zap className="w-3 h-3 text-matrix mt-0.5 shrink-0" />
+                            <CheckCircle2 className="w-3 h-3 text-[#00FF41] mt-0.5 shrink-0" />
                           )}
                           {isFail && (
-                            <X className="w-3 h-3 text-signal-red mt-0.5 shrink-0" />
+                            <AlertCircle className="w-3 h-3 text-[#FF3B30] mt-0.5 shrink-0" />
                           )}
                           <p className="text-gray-400 text-xs leading-relaxed wrap-break-word w-full">
                             {note.content

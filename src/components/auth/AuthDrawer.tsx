@@ -33,10 +33,10 @@ export default function AuthDrawer({ isOpen, onClose }: AuthDrawerProps) {
   const [copied, setCopied] = useState(false);
   const [loading, setLoading] = useState(false);
 
-  // ✅ LOGIC: Default True for Signup (UX), Default False for Login (Security)
+  // Persistence Toggle
   const [rememberMe, setRememberMe] = useState(true);
 
-  // Hard Guard: If logged in, this component should render nothing (or close itself)
+  // Close if logged in
   useEffect(() => {
     if (session.type !== "anon") onClose();
   }, [session.type, onClose]);
@@ -56,8 +56,8 @@ export default function AuthDrawer({ isOpen, onClose }: AuthDrawerProps) {
   // Handlers
   const handleStartSignup = async () => {
     setLoading(true);
-    // Force Remember=True for new accounts to prevent immediate loss
-    const result = await signup(true);
+    // ✅ PASS rememberMe to signup
+    const result = await signup(rememberMe);
     if (result) {
       setCreatedNsec(result.nsec);
       const randomAvatar = `https://api.dicebear.com/9.x/bottts-neutral/svg?seed=${result.user.pubkey}`;
@@ -77,11 +77,11 @@ export default function AuthDrawer({ isOpen, onClose }: AuthDrawerProps) {
   const handleNsecLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!nsecInput.startsWith("nsec1")) return alert("Invalid nsec");
+    // ✅ PASS rememberMe to login
     await loginWithNsec(nsecInput, rememberMe);
     onClose();
   };
 
-  // ... copyToClipboard same as before ...
   const copyToClipboard = () => {
     if (createdNsec) {
       navigator.clipboard.writeText(createdNsec);
@@ -103,8 +103,11 @@ export default function AuthDrawer({ isOpen, onClose }: AuthDrawerProps) {
             <KeyRound className="w-5 h-5" />
             NOSTR_IDENTITY
           </h2>
-          <button onClick={onClose}>
-            <X className="w-5 h-5 text-gray-400" />
+          <button
+            onClick={onClose}
+            className="p-2 hover:bg-white/10 rounded-full text-gray-400"
+          >
+            <X className="w-5 h-5" />
           </button>
         </div>
 
@@ -121,6 +124,22 @@ export default function AuthDrawer({ isOpen, onClose }: AuthDrawerProps) {
               </span>
               <UserPlus className="w-5 h-5 opacity-50 group-hover:opacity-100 transition-opacity" />
             </button>
+
+            <div className="flex items-center justify-center gap-2 mb-2">
+              <input
+                type="checkbox"
+                id="remember_signup"
+                checked={rememberMe}
+                onChange={(e) => setRememberMe(e.target.checked)}
+                className="accent-bitcoin w-4 h-4 cursor-pointer"
+              />
+              <label
+                htmlFor="remember_signup"
+                className="text-xs text-gray-400 select-none cursor-pointer"
+              >
+                Keep me logged in
+              </label>
+            </div>
 
             <div className="flex items-center gap-4 my-4">
               <div className="h-px bg-white/10 flex-1" />
@@ -205,9 +224,8 @@ export default function AuthDrawer({ isOpen, onClose }: AuthDrawerProps) {
           </form>
         )}
 
-        {/* ... (Create Profile & Backup Steps same as previous, omitted for brevity but include them!) ... */}
+        {/* STEP 3: CREATE PROFILE */}
         {step === "create_profile" && (
-          // ... (Reuse previous code) ...
           <div className="space-y-6">
             <div className="text-center">
               <div className="w-24 h-24 mx-auto bg-white/5 rounded-full p-1 border-2 border-bitcoin relative overflow-hidden group">
@@ -259,6 +277,7 @@ export default function AuthDrawer({ isOpen, onClose }: AuthDrawerProps) {
           </div>
         )}
 
+        {/* STEP 4: BACKUP */}
         {step === "backup" && (
           <div className="space-y-6 animate-in fade-in">
             <div className="bg-bitcoin/10 p-4 rounded-lg border border-bitcoin/30 text-center">
