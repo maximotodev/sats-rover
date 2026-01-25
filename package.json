@@ -1,40 +1,17 @@
 {
-  "name": "sats-rover",
-  "version": "0.1.0",
+  "name": "satsrover",
   "private": true,
-  "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
-    "lint": "eslint"
+  "engines": {
+    "node": ">=20.0.0"
   },
-  "dependencies": {
-    "@nostr-dev-kit/ndk": "^2.18.1",
-    "@nostr-dev-kit/ndk-wallet": "^0.7.1",
-    "@nostr-dev-kit/wallet": "^0.8.10",
-    "class-variance-authority": "^0.7.1",
-    "clsx": "^2.1.1",
-    "lucide-react": "^0.562.0",
-    "maplibre-gl": "^5.15.0",
-    "next": "16.1.1",
-    "ngeohash": "^0.6.3",
-    "nostr-tools": "^2.19.4",
-    "react": "19.2.3",
-    "react-dom": "19.2.3",
-    "tailwind-merge": "^3.4.0",
-    "webln": "^0.3.2"
+  "packageManager": "pnpm@9.0.0",
+  "scripts": {
+    "dev": "turbo dev",
+    "build": "turbo build",
+    "lint": "turbo lint",
+    "typecheck": "turbo typecheck"
   },
   "devDependencies": {
-    "@tailwindcss/postcss": "^4",
-    "@types/ngeohash": "^0.6.8",
-    "@types/node": "^20",
-    "@types/react": "^19",
-    "@types/react-dom": "^19",
-    "eslint": "^9",
-    "eslint-config-next": "16.1.1",
-    "prettier": "^3.7.4",
-    "prettier-plugin-tailwindcss": "^0.7.2",
-    "tailwindcss": "^4",
-    "typescript": "^5"
+    "turbo": "^2.0.0"
   }
 }

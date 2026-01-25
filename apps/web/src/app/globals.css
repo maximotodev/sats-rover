@@ -1,0 +1,59 @@
+@import "tailwindcss";
+@import "maplibre-gl/dist/maplibre-gl.css";
+
+:root {
+  /* Primal/Cypherpunk Palette */
+  --bitcoin-orange: #f7931a;
+  --charcoal-dark: #050505; /* Deep OLED Black */
+  --charcoal-light: #121212; /* Card Surface */
+  --matrix-green: #00ff41;
+  --signal-red: #ff3b30;
+  --dim-gray: #333333;
+
+  --background: var(--charcoal-dark);
+  --foreground: #ffffff;
+}
+
+@theme inline {
+  --color-bitcoin: var(--bitcoin-orange);
+  --color-charcoal: var(--charcoal-dark);
+  --color-surface: var(--charcoal-light);
+  --color-matrix: var(--matrix-green);
+  --color-signal: var(--signal-red);
+  --color-dim: var(--dim-gray);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  /* Terminal-like font stack */
+  font-family:
+    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+    "Courier New", monospace;
+  overflow: hidden; /* Prevent elastic scrolling on mobile */
+}
+
+/* Utilities */
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Animations */
+@keyframes pulse-glow {
+  0%,
+  100% {
+    box-shadow: 0 0 5px var(--bitcoin-orange);
+    opacity: 1;
+  }
+  50% {
+    box-shadow: 0 0 20px var(--bitcoin-orange);
+    opacity: 0.8;
+  }
+}
+.animate-pulse-glow {
+  animation: pulse-glow 3s infinite;
+}

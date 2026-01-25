@@ -1,0 +1,250 @@
+[00:00:01.138] Server  LOG     ✓ Ready in 817ms
+[00:00:08.774] Server  LOG     ○ Compiling / ...
+[00:00:10.437] Server  ERROR   ⨯ ./apps/web/src/hooks/use-nostr.ts:9:1
+Export clearNsec doesn't exist in target module
+   7 | } from "@nostr-dev-kit/ndk";
+   8 | import { nip19, generateSecretKey } from "nostr-tools";
+>  9 | import { storeNsec, loadNsec, clearNsec } from "@/lib/storage";
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  10 | import { getExactGeohash, generateCityId } from "@/lib/geoutils";
+  11 |
+  12 | let ndkInstance: NDK | null = null;
+
+The export clearNsec was not found in module [project]/apps/web/src/lib/storage.ts [app-client] (ecmascript).
+Did you mean to import loadNsec?
+All exports of the module are statically known (It doesn't have dynamic exports). So it's known statically that the requested export doesn't exist.
+
+Import traces:
+  Client Component Browser:
+    ./apps/web/src/hooks/use-nostr.ts [Client Component Browser]
+    ./apps/web/src/contexts/NostrSessionContext.tsx [Client Component Browser]
+    ./apps/web/src/contexts/NostrSessionContext.tsx [Server Component]
+    ./apps/web/src/app/layout.tsx [Server Component]
+
+  Client Component SSR:
+    ./apps/web/src/hooks/use-nostr.ts [Client Component SSR]
+    ./apps/web/src/contexts/NostrSessionContext.tsx [Client Component SSR]
+    ./apps/web/src/contexts/NostrSessionContext.tsx [Server Component]
+    ./apps/web/src/app/layout.tsx [Server Component]
+
+
+
+./apps/web/src/hooks/use-nostr.ts:9:1
+Export clearNsec doesn't exist in target module
+   7 | } from "@nostr-dev-kit/ndk";
+   8 | import { nip19, generateSecretKey } from "nostr-tools";
+>  9 | import { storeNsec, loadNsec, clearNsec } from "@/lib/storage";
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  10 | import { getExactGeohash, generateCityId } from "@/lib/geoutils";
+  11 |
+  12 | let ndkInstance: NDK | null = null;
+
+The export clearNsec was not found in module [project]/apps/web/src/lib/storage.ts [app-ssr] (ecmascript).
+Did you mean to import loadNsec?
+All exports of the module are statically known (It doesn't have dynamic exports). So it's known statically that the requested export doesn't exist.
+
+Import traces:
+  Client Component Browser:
+    ./apps/web/src/hooks/use-nostr.ts [Client Component Browser]
+    ./apps/web/src/contexts/NostrSessionContext.tsx [Client Component Browser]
+    ./apps/web/src/contexts/NostrSessionContext.tsx [Server Component]
+    ./apps/web/src/app/layout.tsx [Server Component]
+
+  Client Component SSR:
+    ./apps/web/src/hooks/use-nostr.ts [Client Component SSR]
+    ./apps/web/src/contexts/NostrSessionContext.tsx [Client Component SSR]
+    ./apps/web/src/contexts/NostrSessionContext.tsx [Server Component]
+    ./apps/web/src/app/layout.tsx [Server Component]
+
+
+[00:00:11.828] Browser ERROR   uncaughtError: Error: ./apps/web/src/hooks/use-nostr.ts:9:1
+Export clearNsec doesn't exist in target module
+   7 | } from "@nostr-dev-kit/ndk";
+   8 | import { nip19, generateSecretKey } from "nostr-tools";
+>  9 | import { storeNsec, loadNsec, clearNsec } from "@/lib/storage";
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  10 | import { getExactGeohash, generateCityId } from "@/lib/geoutils";
+  11 |
+  12 | let ndkInstance: NDK | null = null;
+
+The export clearNsec was not found in module [project]/apps/web/src/lib/storage.ts [app-client] (ecmascript).
+Did you mean to import loadNsec?
+All exports of the module are statically known (It doesn't have dynamic exports). So it's known statically that the requested export doesn't exist.
+
+Import traces:
+  Client Component Browser:
+    ./apps/web/src/hooks/use-nostr.ts [Client Component Browser]
+    ./apps/web/src/contexts/NostrSessionContext.tsx [Client Component Browser]
+    ./apps/web/src/contexts/NostrSessionContext.tsx [Server Component]
+    ./apps/web/src/app/layout.tsx [Server Component]
+
+  Client Component SSR:
+    ./apps/web/src/hooks/use-nostr.ts [Client Component SSR]
+    ./apps/web/src/contexts/NostrSessionContext.tsx [Client Component SSR]
+    ./apps/web/src/contexts/NostrSessionContext.tsx [Server Component]
+    ./apps/web/src/app/layout.tsx [Server Component]
+
+
+[00:00:12.054] Browser ERROR   ./apps/web/src/hooks/use-nostr.ts:9:1
+Export clearNsec doesn't exist in target module
+   7 | } from "@nostr-dev-kit/ndk";
+   8 | import { nip19, generateSecretKey } from "nostr-tools";
+>  9 | import { storeNsec, loadNsec, clearNsec } from "@/lib/storage";
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  10 | import { getExactGeohash, generateCityId } from "@/lib/geoutils";
+  11 |
+  12 | let ndkInstance: NDK | null = null;
+
+The export clearNsec was not found in module [project]/apps/web/src/lib/storage.ts [app-client] (ecmascript).
+Did you mean to import loadNsec?
+All exports of the module are statically known (It doesn't have dynamic exports). So it's known statically that the requested export doesn't exist.
+
+Import traces:
+  Client Component Browser:
+    ./apps/web/src/hooks/use-nostr.ts [Client Component Browser]
+    ./apps/web/src/contexts/NostrSessionContext.tsx [Client Component Browser]
+    ./apps/web/src/contexts/NostrSessionContext.tsx [Server Component]
+    ./apps/web/src/app/layout.tsx [Server Component]
+
+  Client Component SSR:
+    ./apps/web/src/hooks/use-nostr.ts [Client Component SSR]
+    ./apps/web/src/contexts/NostrSessionContext.tsx [Client Component SSR]
+    ./apps/web/src/contexts/NostrSessionContext.tsx [Server Component]
+    ./apps/web/src/app/layout.tsx [Server Component]
+[00:00:12.054] Browser ERROR   ./apps/web/src/hooks/use-nostr.ts:9:1
+Export clearNsec doesn't exist in target module
+   7 | } from "@nostr-dev-kit/ndk";
+   8 | import { nip19, generateSecretKey } from "nostr-tools";
+>  9 | import { storeNsec, loadNsec, clearNsec } from "@/lib/storage";
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  10 | import { getExactGeohash, generateCityId } from "@/lib/geoutils";
+  11 |
+  12 | let ndkInstance: NDK | null = null;
+
+The export clearNsec was not found in module [project]/apps/web/src/lib/storage.ts [app-ssr] (ecmascript).
+Did you mean to import loadNsec?
+All exports of the module are statically known (It doesn't have dynamic exports). So it's known statically that the requested export doesn't exist.
+
+Import traces:
+  Client Component Browser:
+    ./apps/web/src/hooks/use-nostr.ts [Client Component Browser]
+    ./apps/web/src/contexts/NostrSessionContext.tsx [Client Component Browser]
+    ./apps/web/src/contexts/NostrSessionContext.tsx [Server Component]
+    ./apps/web/src/app/layout.tsx [Server Component]
+
+  Client Component SSR:
+    ./apps/web/src/hooks/use-nostr.ts [Client Component SSR]
+    ./apps/web/src/contexts/NostrSessionContext.tsx [Client Component SSR]
+    ./apps/web/src/contexts/NostrSessionContext.tsx [Server Component]
+    ./apps/web/src/app/layout.tsx [Server Component]
+[00:00:12.054] Browser ERROR   ./apps/web/src/hooks/use-nostr.ts:9:1
+Export clearNsec doesn't exist in target module
+   7 | } from "@nostr-dev-kit/ndk";
+   8 | import { nip19, generateSecretKey } from "nostr-tools";
+>  9 | import { storeNsec, loadNsec, clearNsec } from "@/lib/storage";
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  10 | import { getExactGeohash, generateCityId } from "@/lib/geoutils";
+  11 |
+  12 | let ndkInstance: NDK | null = null;
+
+The export clearNsec was not found in module [project]/apps/web/src/lib/storage.ts [app-client] (ecmascript).
+Did you mean to import loadNsec?
+All exports of the module are statically known (It doesn't have dynamic exports). So it's known statically that the requested export doesn't exist.
+
+Import traces:
+  Client Component Browser:
+    ./apps/web/src/hooks/use-nostr.ts [Client Component Browser]
+    ./apps/web/src/contexts/NostrSessionContext.tsx [Client Component Browser]
+    ./apps/web/src/contexts/NostrSessionContext.tsx [Server Component]
+    ./apps/web/src/app/layout.tsx [Server Component]
+
+  Client Component SSR:
+    ./apps/web/src/hooks/use-nostr.ts [Client Component SSR]
+    ./apps/web/src/contexts/NostrSessionContext.tsx [Client Component SSR]
+    ./apps/web/src/contexts/NostrSessionContext.tsx [Server Component]
+    ./apps/web/src/app/layout.tsx [Server Component]
+[00:00:12.054] Browser ERROR   ./apps/web/src/hooks/use-nostr.ts:9:1
+Export clearNsec doesn't exist in target module
+   7 | } from "@nostr-dev-kit/ndk";
+   8 | import { nip19, generateSecretKey } from "nostr-tools";
+>  9 | import { storeNsec, loadNsec, clearNsec } from "@/lib/storage";
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  10 | import { getExactGeohash, generateCityId } from "@/lib/geoutils";
+  11 |
+  12 | let ndkInstance: NDK | null = null;
+
+The export clearNsec was not found in module [project]/apps/web/src/lib/storage.ts [app-ssr] (ecmascript).
+Did you mean to import loadNsec?
+All exports of the module are statically known (It doesn't have dynamic exports). So it's known statically that the requested export doesn't exist.
+
+Import traces:
+  Client Component Browser:
+    ./apps/web/src/hooks/use-nostr.ts [Client Component Browser]
+    ./apps/web/src/contexts/NostrSessionContext.tsx [Client Component Browser]
+    ./apps/web/src/contexts/NostrSessionContext.tsx [Server Component]
+    ./apps/web/src/app/layout.tsx [Server Component]
+
+  Client Component SSR:
+    ./apps/web/src/hooks/use-nostr.ts [Client Component SSR]
+    ./apps/web/src/contexts/NostrSessionContext.tsx [Client Component SSR]
+    ./apps/web/src/contexts/NostrSessionContext.tsx [Server Component]
+    ./apps/web/src/app/layout.tsx [Server Component]
+[00:00:12.270] Browser ERROR   ./apps/web/src/hooks/use-nostr.ts:9:1
+Export clearNsec doesn't exist in target module
+   7 | } from "@nostr-dev-kit/ndk";
+   8 | import { nip19, generateSecretKey } from "nostr-tools";
+>  9 | import { storeNsec, loadNsec, clearNsec } from "@/lib/storage";
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  10 | import { getExactGeohash, generateCityId } from "@/lib/geoutils";
+  11 |
+  12 | let ndkInstance: NDK | null = null;
+
+The export clearNsec was not found in module [project]/apps/web/src/lib/storage.ts [app-client] (ecmascript).
+Did you mean to import loadNsec?
+All exports of the module are statically known (It doesn't have dynamic exports). So it's known statically that the requested export doesn't exist.
+
+Import traces:
+  Client Component Browser:
+    ./apps/web/src/hooks/use-nostr.ts [Client Component Browser]
+    ./apps/web/src/contexts/NostrSessionContext.tsx [Client Component Browser]
+    ./apps/web/src/contexts/NostrSessionContext.tsx [Server Component]
+    ./apps/web/src/app/layout.tsx [Server Component]
+
+  Client Component SSR:
+    ./apps/web/src/hooks/use-nostr.ts [Client Component SSR]
+    ./apps/web/src/contexts/NostrSessionContext.tsx [Client Component SSR]
+    ./apps/web/src/contexts/NostrSessionContext.tsx [Server Component]
+    ./apps/web/src/app/layout.tsx [Server Component]
+[00:00:12.271] Browser ERROR   ./apps/web/src/hooks/use-nostr.ts:9:1
+Export clearNsec doesn't exist in target module
+   7 | } from "@nostr-dev-kit/ndk";
+   8 | import { nip19, generateSecretKey } from "nostr-tools";
+>  9 | import { storeNsec, loadNsec, clearNsec } from "@/lib/storage";
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  10 | import { getExactGeohash, generateCityId } from "@/lib/geoutils";
+  11 |
+  12 | let ndkInstance: NDK | null = null;
+
+The export clearNsec was not found in module [project]/apps/web/src/lib/storage.ts [app-ssr] (ecmascript).
+Did you mean to import loadNsec?
+All exports of the module are statically known (It doesn't have dynamic exports). So it's known statically that the requested export doesn't exist.
+
+Import traces:
+  Client Component Browser:
+    ./apps/web/src/hooks/use-nostr.ts [Client Component Browser]
+    ./apps/web/src/contexts/NostrSessionContext.tsx [Client Component Browser]
+    ./apps/web/src/contexts/NostrSessionContext.tsx [Server Component]
+    ./apps/web/src/app/layout.tsx [Server Component]
+
+  Client Component SSR:
+    ./apps/web/src/hooks/use-nostr.ts [Client Component SSR]
+    ./apps/web/src/contexts/NostrSessionContext.tsx [Client Component SSR]
+    ./apps/web/src/contexts/NostrSessionContext.tsx [Server Component]
+    ./apps/web/src/app/layout.tsx [Server Component]
+[00:02:06.787] Server  LOG     ✓ Compiled in 51ms
+[00:02:07.652] Browser INFO    %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
+[00:02:39.186] Browser INFO    %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
+[00:02:43.341] Server  ERROR   Merchant Fetch Error: Error: Overpass API responded with 504
+[00:04:51.548] Server  ERROR   Merchant Fetch Error: Error: Overpass API responded with 504
+[00:05:06.466] Browser ERROR   unhandledRejection: Error: No keys available
+[00:06:25.669] Browser INFO    %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
