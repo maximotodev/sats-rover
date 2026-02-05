@@ -1,0 +1,25 @@
+[project]
+name = "satsrover-api"
+version = "0.1.0"
+description = "SatsRover Engine API (FastAPI + PostGIS + Redis)"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115.0",
+  "uvicorn[standard]>=0.30.0",
+  "pydantic>=2.8.0",
+  "pydantic-settings>=2.4.0",
+
+  "SQLAlchemy>=2.0.32",
+  "asyncpg>=0.29.0",
+  "alembic>=1.13.2",
+  "geoalchemy2>=0.15.2",
+
+  "redis>=5.0.8",
+  "orjson>=3.10.7",
+  "tenacity>=8.5.0",
+
+  "structlog>=24.2.0",
+]
+
+[tool.setuptools]
+packages = ["app"]
