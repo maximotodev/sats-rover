@@ -10,13 +10,29 @@ const RELAYS = [
   "wss://relay.primal.net",
   "wss://nos.lol",
 ];
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const pool = new Pool({
+  connectionString: process.env.INDEXER_DATABASE_URL || process.env.DATABASE_URL,
+});
+
+function log(level: "info" | "warn" | "error", msg: string, ctx: Record<string, unknown> = {}) {
+  const payload = {
+    ts: new Date().toISOString(),
+    level,
+    msg,
+    service: "indexer",
+    ...ctx,
+  };
+  const line = JSON.stringify(payload);
+  if (level === "error") console.error(line);
+  else if (level === "warn") console.warn(line);
+  else console.log(line);
+}
 
 function connect(url: string) {
   const ws = new WebSocket(url);
 
   ws.on("open", () => {
-    console.log(`[Indexer] Monitoring ${url}`);
+    log("info", "relay_connected", { relay: url });
     ws.send(
       JSON.stringify([
         "REQ",
@@ -31,23 +47,32 @@ function connect(url: string) {
       const msg = JSON.parse(data.toString());
       if (msg[0] === "EVENT") {
         const result = await processSatsRoverEvent(pool, msg[2]);
-        if (result)
-          console.log(
-            `[Indexer] 🚀 Glow Boost: ${result.placeId} (${result.status})`,
-          );
+        if (result) {
+          log("info", "signal_ingested", {
+            relay: url,
+            placeId: result.placeId,
+            status: result.status,
+          });
+        }
       }
-    } catch (e) {}
+    } catch (e: any) {
+      log("error", "relay_message_parse_error", {
+        relay: url,
+        error: e?.message || String(e),
+        raw: String(data).slice(0, 300),
+      });
+    }
   });
 
   ws.on("close", () => {
-    console.log(`[Indexer] Connection lost ${url}. Retrying...`);
+    log("warn", "relay_disconnected", { relay: url, retryInMs: 5000 });
     setTimeout(() => connect(url), 5000);
   });
 
   ws.on("error", (err: any) =>
-    console.error(`[Indexer] ${url} error:`, err.message),
+    log("error", "relay_error", { relay: url, error: err?.message || String(err) }),
   );
 }
 
-console.log("[Indexer] Starting Live Nostr Indexer...");
+log("info", "indexer_start", { relayCount: RELAYS.length });
 RELAYS.forEach(connect);
