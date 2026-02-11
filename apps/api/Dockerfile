@@ -21,3 +21,5 @@ COPY app /app/app
 COPY scripts /app/scripts
 
 EXPOSE 8000
+# Render provides PORT; bind to 0.0.0.0 or you’ll get 502s
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
