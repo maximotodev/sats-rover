@@ -1,0 +1,36 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgis/postgis:16-3.4
+    container_name: satsrover-postgres
+    environment:
+      POSTGRES_USER: satsrover
+      POSTGRES_PASSWORD: satsrover
+      POSTGRES_DB: satsrover
+    ports:
+      - "5432:5432"
+    volumes:
+      - satsrover_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U satsrover -d satsrover"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: satsrover-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - satsrover_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  satsrover_postgres_data:
+  satsrover_redis_data:

@@ -4,9 +4,12 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 
+HEX64 = r"^[0-9a-f]{64}$"
+
+
 class SignalFeedItem(BaseModel):
-    event_id: str
-    pubkey: str
+    event_id: str = Field(pattern=HEX64)
+    pubkey: str = Field(pattern=HEX64)
     status: str
     content: str = ""
     created_at: datetime
@@ -18,7 +21,7 @@ class PlaceFeedOut(BaseModel):
     total_signals: int = 0
     recent_successes: int = 0
     last_confirmed_at: datetime | None = None
-    items: list[SignalFeedItem] = []
+    items: list[SignalFeedItem] = Field(default_factory=list)
 
 
 class CheckinIntentOut(BaseModel):
@@ -27,9 +30,9 @@ class CheckinIntentOut(BaseModel):
 
 
 class CheckinConfirmIn(BaseModel):
-    event_id: str
+    event_id: str = Field(pattern=HEX64)
     place_id: str
-    pubkey: str | None = None
+    pubkey: str | None = Field(default=None, pattern=HEX64)
     payment_evidence: dict | None = None
 
 

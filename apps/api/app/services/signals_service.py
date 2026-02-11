@@ -1,14 +1,26 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 import hashlib
+import json
+import logging
 import secrets
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.schemas.signal import PlaceFeedOut, SignalFeedItem, CheckinIntentOut, CheckinConfirmIn, CheckinConfirmOut
+from app.schemas.signal import (
+    CheckinConfirmIn,
+    CheckinConfirmOut,
+    CheckinIntentOut,
+    PlaceFeedOut,
+    SignalFeedItem,
+)
 from app.services.redis_client import redis_client
+
+logger = logging.getLogger(__name__)
+CHECKIN_INTENT_TTL_SECONDS = 120
+CHECKIN_PENDING_TTL_SECONDS = 900  # 15 minutes
 
 
 async def get_place_feed(db: AsyncSession, place_id: str, limit: int = 50) -> PlaceFeedOut:
@@ -71,29 +83,61 @@ async def get_place_feed(db: AsyncSession, place_id: str, limit: int = 50) -> Pl
 async def create_checkin_intent(place_id: str, requester_id: str) -> CheckinIntentOut:
     issued_at = datetime.now(timezone.utc)
     nonce = secrets.token_hex(8)
-    digest = hashlib.sha256(f"{place_id}:{requester_id}:{nonce}:{issued_at.timestamp()}".encode()).hexdigest()
+    digest = hashlib.sha256(
+        f"{place_id}:{requester_id}:{nonce}:{issued_at.timestamp()}".encode(),
+    ).hexdigest()
     token = f"sr_ci_{digest[:32]}"
 
-    # lightweight TTL store for replay protection
-    await redis_client.setex(f"checkin:intent:{token}", 120, place_id)
+    payload = {
+        "place_id": place_id,
+        "requester_id": requester_id,
+        "issued_at": issued_at.isoformat(),
+    }
+    await redis_client.setex(
+        f"checkin:intent:{token}",
+        CHECKIN_INTENT_TTL_SECONDS,
+        json.dumps(payload),
+    )
 
-    return CheckinIntentOut(intent_token=token, expires_in_seconds=120)
+    return CheckinIntentOut(intent_token=token, expires_in_seconds=CHECKIN_INTENT_TTL_SECONDS)
 
 
 async def confirm_checkin(payload: CheckinConfirmIn, intent_token: str | None) -> CheckinConfirmOut:
     if not intent_token:
         return CheckinConfirmOut(status="rejected", reason_code="missing_intent_token")
 
-    key = f"checkin:intent:{intent_token}"
-    place = await redis_client.get(key)
-    if not place:
+    intent_key = f"checkin:intent:{intent_token}"
+    raw_intent = await redis_client.getdel(intent_key)
+    if not raw_intent:
         return CheckinConfirmOut(status="rejected", reason_code="intent_expired")
 
-    if place != payload.place_id:
+    intent = json.loads(raw_intent)
+    if intent.get("place_id") != payload.place_id:
         return CheckinConfirmOut(status="rejected", reason_code="intent_place_mismatch")
 
-    # one-time intent token
-    await redis_client.delete(key)
+    pending_key = f"checkin:pending:{payload.event_id}"
+    pending_record = {
+        "event_id": payload.event_id,
+        "place_id": payload.place_id,
+        "pubkey": payload.pubkey,
+        "payment_evidence": payload.payment_evidence,
+        "state": "pending",
+        "confirmed_at": datetime.now(timezone.utc).isoformat(),
+    }
 
-    # indexer finalizes canonical persistence; API acknowledges pending lifecycle.
+    await redis_client.setex(
+        pending_key,
+        CHECKIN_PENDING_TTL_SECONDS,
+        json.dumps(pending_record),
+    )
+
+    logger.info(
+        "checkin_confirm_pending",
+        extra={
+            "event_id": payload.event_id,
+            "place_id": payload.place_id,
+            "has_pubkey": payload.pubkey is not None,
+        },
+    )
+
     return CheckinConfirmOut(status="pending", reason_code=None)

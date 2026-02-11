@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     redis_url: str
 
     cors_origins: str = "http://localhost:3000"
-    places_cache_ttl_seconds: int = 60
+    places_cache_ttl_seconds: int = 15
 
     @property
     def cors_origins_list(self) -> list[str]:

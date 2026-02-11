@@ -101,6 +101,11 @@ I handle correctness.
 
 ---
 
+
+## Local Development
+
+For full-stack local setup (PostGIS + Redis + API + web + indexer), see `docs/local-dev.md`.
+
 ## Getting Started (Backend)
 
 ```bash
