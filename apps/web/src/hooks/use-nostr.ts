@@ -130,11 +130,24 @@ export function useNostr() {
 
       try {
         const relays = await event.publish();
-        return relays.size > 0;
+        return { ok: relays.size > 0, eventId: event.id };
       } catch (e) {
         console.error("Signal broadcast failed", e);
-        return false;
+        return { ok: false };
       }
+    },
+    [ndk, session],
+  );
+
+
+  const updateProfile = useCallback(
+    async (name: string, about: string, picture: string) => {
+      if (session.type === "anon" || !ndk) throw new Error("Auth required");
+
+      const event = new NDKEvent(ndk);
+      event.kind = 0;
+      event.content = JSON.stringify({ name, about, picture });
+      await event.publish();
     },
     [ndk, session],
   );
@@ -168,6 +181,7 @@ export function useNostr() {
     loginWithNsec,
     signup,
     logout,
+    updateProfile,
     publishSignal,
     publishClaim,
   };

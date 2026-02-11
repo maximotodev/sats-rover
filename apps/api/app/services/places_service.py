@@ -1,16 +1,15 @@
 # apps/api/app/services/places_service.py
 from __future__ import annotations
 
-import os
-import logging
 import hashlib
 import json
+import logging
+import os
 from dataclasses import dataclass
-from typing import Any
 
-from geoalchemy2.functions import ST_X, ST_Y
 from geoalchemy2 import Geometry
-from sqlalchemy import select, func, cast, text
+from geoalchemy2.functions import ST_X, ST_Y
+from sqlalchemy import cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.settings import settings
@@ -23,6 +22,7 @@ CACHE_DEBUG = os.getenv("PLACES_CACHE_DEBUG", "0") == "1"
 # MUST MATCH CLIENT / NEXT PROXY
 BBOX_DECIMALS = 3  # ~110m
 
+
 @dataclass(frozen=True)
 class BBox:
     west: float
@@ -31,7 +31,6 @@ class BBox:
     north: float
 
     def canonical_str(self) -> str:
-        # canonical order west,south,east,north
         return f"{self.west},{self.south},{self.east},{self.north}"
 
 
@@ -46,69 +45,54 @@ def parse_bbox(bbox: str) -> BBox:
         raise ValueError("bbox must be 'west,south,east,north'")
 
     try:
-        a, b, c, d = (float(p) for p in parts)
-    except Exception:
-        raise ValueError("bbox must contain valid numbers")
+        west_raw, south_raw, east_raw, north_raw = (float(p) for p in parts)
+    except ValueError as exc:
+        raise ValueError("bbox must contain valid numbers") from exc
 
-    # Range checks (still do these pre-normalization)
-    if not (-180 <= a <= 180 and -180 <= c <= 180 and -90 <= b <= 90 and -90 <= d <= 90):
-        # We still allow mixed order from proxy normalization,
-        # but places endpoint contract is canonical, so keep strict here.
-        # If you want to accept legacy order at FastAPI too, add a heuristic here.
-        pass
+    if not (-180 <= west_raw <= 180 and -180 <= east_raw <= 180):
+        raise ValueError("bbox longitude out of range (-180..180)")
+    if not (-90 <= south_raw <= 90 and -90 <= north_raw <= 90):
+        raise ValueError("bbox latitude out of range (-90..90)")
 
-    # Normalize min/max so west<east and south<north
-    west = min(a, c)
-    east = max(a, c)
-    south = min(b, d)
-    north = max(b, d)
+    west = min(west_raw, east_raw)
+    east = max(west_raw, east_raw)
+    south = min(south_raw, north_raw)
+    north = max(south_raw, north_raw)
 
-    # Validate ranges after normalization
-    if not (-180 <= west <= 180 and -180 <= east <= 180):
-        raise ValueError("bbox longitude out of range")
-    if not (-90 <= south <= 90 and -90 <= north <= 90):
-        raise ValueError("bbox latitude out of range")
     if west >= east or south >= north:
         raise ValueError("bbox is invalid (west<east and south<north required)")
 
-    # Round to match client/proxy (stable cache keys)
-    west = _round(west)
-    south = _round(south)
-    east = _round(east)
-    north = _round(north)
+    return BBox(
+        west=_round(west),
+        south=_round(south),
+        east=_round(east),
+        north=_round(north),
+    )
 
-    return BBox(west=west, south=south, east=east, north=north)
 
-
-def bbox_cache_key(b: BBox) -> str:
-    # Key is derived from the canonical, already-rounded bbox string
-    raw = b.canonical_str()
-    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+def bbox_cache_key(bbox: BBox) -> str:
+    digest = hashlib.sha256(bbox.canonical_str().encode("utf-8")).hexdigest()[:16]
     return f"places:bbox:{digest}"
 
 
-async def list_places_by_bbox(db: AsyncSession, bbox: str, limit: int = 600) -> list[PlaceOut]:
-    b = parse_bbox(bbox_str)
-    key = bbox_cache_key(b)
+async def list_places_by_bbox(db: AsyncSession, bbox: BBox, limit: int = 600) -> list[PlaceOut]:
+    key = bbox_cache_key(bbox)
 
     cached = await redis_client.get(key)
     if cached:
         if CACHE_DEBUG:
-            logger.info("places cache HIT bbox=%s key=%s", b.canonical_str(), key)
+            logger.info("places cache HIT bbox=%s key=%s", bbox.canonical_str(), key)
         try:
             payload = json.loads(cached)
             return [PlaceOut(**x) for x in payload]
         except Exception:
-            # fall through
             if CACHE_DEBUG:
-                logger.warning("places cache CORRUPT bbox=%s key=%s", b.canonical_str(), key)
+                logger.warning("places cache CORRUPT bbox=%s key=%s", bbox.canonical_str(), key)
 
     if CACHE_DEBUG:
-        logger.info("places cache MISS bbox=%s key=%s", b.canonical_str(), key)
+        logger.info("places cache MISS bbox=%s key=%s", bbox.canonical_str(), key)
 
-    envelope = func.ST_MakeEnvelope(b.west, b.south, b.east, b.north, 4326)
-
-    # geography -> geometry for spatial ops
+    envelope = func.ST_MakeEnvelope(bbox.west, bbox.south, bbox.east, bbox.north, 4326)
     geom = cast(Place.location, Geometry(geometry_type="POINT", srid=4326))
 
     query = (
@@ -123,7 +107,7 @@ async def list_places_by_bbox(db: AsyncSession, bbox: str, limit: int = 600) -> 
         )
         .where(func.ST_Intersects(geom, envelope))
         .order_by(Place.glow_score.desc())
-        .limit(500)
+        .limit(limit)
     )
 
     result = await db.execute(query)
@@ -136,3 +120,8 @@ async def list_places_by_bbox(db: AsyncSession, bbox: str, limit: int = 600) -> 
         json.dumps([o.model_dump() for o in out]),
     )
     return out
+
+
+async def get_places_by_bbox(db: AsyncSession, bbox_raw: str, limit: int = 600) -> list[PlaceOut]:
+    bbox = parse_bbox(bbox_raw)
+    return await list_places_by_bbox(db, bbox, limit=limit)

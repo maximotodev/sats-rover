@@ -39,7 +39,7 @@ export function useLightningEngine(ndk: NDK | null) {
 
       setNwc(instance);
       setStatus("connected");
-      localStorage.setItem("satsrover_nwc", connectionString);
+      sessionStorage.setItem("satsrover_nwc", connectionString);
       checkFuel(instance);
     } catch (e) {
       console.error("Engine Start Failed", e);
@@ -68,7 +68,7 @@ export function useLightningEngine(ndk: NDK | null) {
 
   // Auto-ignite
   useEffect(() => {
-    const stored = localStorage.getItem("satsrover_nwc");
+    const stored = sessionStorage.getItem("satsrover_nwc");
     if (stored && ndk && status === "idle") ignite(stored);
   }, [ndk]);
 
@@ -82,7 +82,7 @@ export function useLightningEngine(ndk: NDK | null) {
       setNwc(null);
       setBalance(null);
       setStatus("idle");
-      localStorage.removeItem("satsrover_nwc");
+      sessionStorage.removeItem("satsrover_nwc");
     },
   };
 }
