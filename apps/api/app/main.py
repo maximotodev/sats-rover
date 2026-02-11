@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 from app.api.v1.places import router as places_router
+from app.api.v1.signals import router as signals_router
 from app.core.settings import settings
 from app.db.engine import engine
 from app.services.redis_client import redis_client
@@ -18,6 +19,7 @@ app.add_middleware(
 )
 
 app.include_router(places_router)
+app.include_router(signals_router)
 
 
 @app.get("/healthz", tags=["health"])

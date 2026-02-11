@@ -1,6 +1,6 @@
 "use client";
 import React, { createContext, useContext } from "react";
-import NDK, { NDKUser } from "@nostr-dev-kit/ndk";
+import NDK from "@nostr-dev-kit/ndk";
 import { useNostr, NostrSession } from "@/hooks/use-nostr";
 
 export interface SessionCapabilities {
@@ -14,31 +14,21 @@ interface NostrSessionContextValue {
   session: NostrSession;
   capabilities: SessionCapabilities;
   loginWithExtension: () => Promise<void>;
-  // ✅ FIXED: Added remember optional param
   loginWithNsec: (nsec: string, remember?: boolean) => Promise<void>;
-  // ✅ FIXED: Added remember optional param
   signup: (
-    remember?: boolean
+    remember?: boolean,
   ) => Promise<{ nsec: string; user: any } | undefined>;
-  updateProfile: (
-    name: string,
-    about: string,
-    picture: string
-  ) => Promise<void>;
+  updateProfile: (name: string, about: string, picture: string) => Promise<void>;
   logout: () => void;
   publishSignal: (
-    merchantName: string,
     merchantId: string,
-    lat: number,
-    lon: number,
     paymentResult: "success" | "failed" | "did_not_try",
-    paymentMethod: "lightning" | "onchain" | "none",
-    comment: string
-  ) => Promise<boolean>;
+    comment: string,
+  ) => Promise<{ ok: boolean; eventId?: string }>;
 }
 
 const NostrSessionContext = createContext<NostrSessionContextValue | null>(
-  null
+  null,
 );
 
 export function NostrSessionProvider({

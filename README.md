@@ -104,7 +104,7 @@ I handle correctness.
 ## Getting Started (Backend)
 
 ```bash
-cd backend
+cd apps/api
 
 # Create virtual environment
 python3 -m venv .venv
