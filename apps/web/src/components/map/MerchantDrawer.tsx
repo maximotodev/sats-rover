@@ -20,8 +20,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useSession } from "@/contexts/NostrSessionContext";
-import { NDKEvent, NDKUserProfile } from "@nostr-dev-kit/ndk";
-import { calculateMerchantIntensity } from "@/lib/scoring";
+import { NDKUserProfile } from "@nostr-dev-kit/ndk";
 
 interface MerchantDrawerProps {
   merchant: Merchant | null;
@@ -29,6 +28,14 @@ interface MerchantDrawerProps {
 }
 
 type ProfileMap = Record<string, NDKUserProfile>;
+
+interface FeedItem {
+  event_id: string;
+  pubkey: string;
+  status: "success" | "failed" | "did_not_try";
+  content: string;
+  created_at: string;
+}
 
 function tagTruthy(v: any): boolean {
   if (v === true) return true;
@@ -48,7 +55,7 @@ export default function MerchantDrawer({
     useSession();
 
   // Data State
-  const [reviews, setReviews] = useState<NDKEvent[]>([]);
+  const [reviews, setReviews] = useState<FeedItem[]>([]);
   const [profiles, setProfiles] = useState<ProfileMap>({});
   const [loadingReviews, setLoadingReviews] = useState(false);
 
@@ -74,33 +81,39 @@ export default function MerchantDrawer({
   // Scroll Ref
   const feedTopRef = useRef<HTMLDivElement>(null);
 
-  // 1. Fetch Logic
+  // 1. Fetch Logic (index-backed API first, relay only for profiles)
   useEffect(() => {
-    if (merchant && ndk) {
+    const run = async () => {
+      if (!merchant) {
+        setReviews([]);
+        setReliability(0);
+        return;
+      }
+
       setLoadingReviews(true);
       setIsReporting(false);
       setPaymentStatus("success");
       setComment("");
       setPublishError(null);
 
-      // Fetch by place ID
-      const filter = {
-        kinds: [1],
-        "#place": [merchant.id],
-        "#t": ["satsrover"],
-        limit: 50,
-      };
-
-      ndk.fetchEvents(filter).then(async (events) => {
-        const notes = Array.from(events).sort(
-          (a, b) => b.created_at! - a.created_at!,
+      try {
+        const resp = await fetch(
+          `/api/places/${encodeURIComponent(merchant.id)}/feed`,
         );
+        const json = await resp.json();
+        const payload = json?.data;
+        const notes: FeedItem[] = Array.isArray(payload?.items)
+          ? payload.items
+          : [];
+
         setReviews(notes);
+        const confidence =
+          typeof payload?.confidence_score === "number"
+            ? payload.confidence_score / 100
+            : 0;
+        setReliability(confidence);
 
-        const score = calculateMerchantIntensity(notes);
-        setReliability(score);
-
-        if (notes.length > 0) {
+        if (notes.length > 0 && ndk) {
           const uniquePubkeys = Array.from(new Set(notes.map((n) => n.pubkey)));
           const newProfiles: ProfileMap = {};
           await Promise.all(
@@ -112,13 +125,15 @@ export default function MerchantDrawer({
           );
           setProfiles((prev) => ({ ...prev, ...newProfiles }));
         }
-
+      } catch {
+        setReviews([]);
+        setReliability(0);
+      } finally {
         setLoadingReviews(false);
-      });
-    } else {
-      setReviews([]);
-      setReliability(0);
-    }
+      }
+    };
+
+    void run();
   }, [merchant, ndk]);
 
   const categoryLabel =
@@ -160,20 +175,42 @@ export default function MerchantDrawer({
     setIsPublishing(true);
     setPublishError(null);
 
-    // 1. Publish to Network
-    const success = await publishSignal(
-      merchant.name,
-      merchant.id,
-      merchant.lat,
-      merchant.lon,
-      paymentStatus,
-      "lightning",
-      comment,
-    );
+    // 1) Create check-in intent
+    let intentToken = "";
+    try {
+      const intentRes = await fetch("/api/checkins/intent", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ placeId: merchant.id }),
+      });
+      const intentData = await intentRes.json();
+      intentToken = intentData.intent_token || "";
+    } catch {
+      intentToken = "";
+    }
+
+    // 2) Publish to relays
+    const publishResult = await publishSignal(merchant.id, paymentStatus, comment);
+
+    // 3) Confirm lifecycle with backend
+    if (publishResult.ok && intentToken) {
+      await fetch("/api/checkins/confirm", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-checkin-intent": intentToken,
+        },
+        body: JSON.stringify({
+          eventId: publishResult.eventId,
+          placeId: merchant.id,
+          pubkey: session.pubkey,
+        }),
+      });
+    }
 
     setIsPublishing(false);
 
-    if (success) {
+    if (publishResult.ok) {
       // 2. Optimistic UI Update (Show immediately without refetch)
       const statusEmoji =
         paymentStatus === "success"
@@ -182,13 +219,13 @@ export default function MerchantDrawer({
             ? "❌"
             : "👀";
 
-      const optimisticNote = {
-        id: `opt-${Date.now()}`,
+      const optimisticNote: FeedItem = {
+        event_id: `opt-${Date.now()}`,
         pubkey: session.pubkey || "unknown",
-        created_at: Math.floor(Date.now() / 1000),
+        created_at: new Date().toISOString(),
         content: `${statusEmoji} ${comment}`,
-        tags: [["status", paymentStatus]],
-      } as NDKEvent;
+        status: paymentStatus,
+      };
 
       setReviews((prev) => [optimisticNote, ...prev]);
 
@@ -214,9 +251,7 @@ export default function MerchantDrawer({
     }
   };
 
-  const successCount = reviews.filter((r) =>
-    r.tags.some((t) => t[0] === "status" && t[1] === "success"),
-  ).length;
+  const successCount = reviews.filter((r) => r.status === "success").length;
 
   return (
     <div
@@ -465,7 +500,7 @@ export default function MerchantDrawer({
 
               {loadingReviews ? (
                 <div className="text-xs text-[#F7931A] animate-pulse font-mono">
-                  Scanning relays for telemetry...
+                  Loading indexed signal feed...
                 </div>
               ) : reviews.length === 0 ? (
                 <div className="text-xs text-gray-600 font-mono">
@@ -481,15 +516,12 @@ export default function MerchantDrawer({
                       note.pubkey.slice(0, 8);
                     const image = profile?.image;
 
-                    const statusTag = note.tags.find(
-                      (t) => t[0] === "status",
-                    )?.[1];
-                    const isSuccess = statusTag === "success";
-                    const isFail = statusTag === "failed";
+                    const isSuccess = note.status === "success";
+                    const isFail = note.status === "failed";
 
                     return (
                       <div
-                        key={note.id}
+                        key={note.event_id}
                         className="bg-white/5 border border-white/5 p-3 rounded hover:border-white/10 transition-colors animate-in fade-in slide-in-from-top-2"
                       >
                         <div className="flex items-center gap-3 mb-2">
@@ -512,7 +544,7 @@ export default function MerchantDrawer({
 
                           <span className="text-[9px] text-gray-600 ml-auto font-mono">
                             {new Date(
-                              note.created_at! * 1000,
+                              new Date(note.created_at).getTime(),
                             ).toLocaleDateString()}
                           </span>
                         </div>

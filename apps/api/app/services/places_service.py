@@ -88,7 +88,7 @@ def bbox_cache_key(b: BBox) -> str:
 
 
 async def list_places_by_bbox(db: AsyncSession, bbox: str, limit: int = 600) -> list[PlaceOut]:
-    b = parse_bbox(bbox_str)
+    b = parse_bbox(bbox)
     key = bbox_cache_key(b)
 
     cached = await redis_client.get(key)
@@ -123,7 +123,7 @@ async def list_places_by_bbox(db: AsyncSession, bbox: str, limit: int = 600) -> 
         )
         .where(func.ST_Intersects(geom, envelope))
         .order_by(Place.glow_score.desc())
-        .limit(500)
+        .limit(limit)
     )
 
     result = await db.execute(query)

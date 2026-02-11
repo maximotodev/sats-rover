@@ -24,21 +24,22 @@ Every signal is assumed hostile until proven valid by cryptographic signature an
 
 ## Architecture Overview
 
+```
 sats-rover/
-├── frontend/ # Next.js + TypeScript UI (maps, identity, UX)
-├── backend/ # FastAPI verification engine
-│ ├── app/
-│ │ ├── core/ # Protocol logic (Nostr serialization)
-│ │ └── services/# Signature verification
-│ ├── scripts/ # Test event generators
-│ └── requirements.txt
+├── apps/
+│ ├── web/     # Next.js + TypeScript UI (maps, identity, UX)
+│ ├── api/     # FastAPI + Postgres/PostGIS services
+│ └── indexer/ # Nostr ingestion + enrichment worker
 ├── docs/
 │ └── architecture.md
 └── README.md
+```
+
+For a deeper system design and tradeoff analysis, see `docs/architecture.md`.
 
 ---
 
-## Frontend
+## Frontend (apps/web)
 
 - **Next.js (App Router)**
 - **TypeScript**
@@ -50,7 +51,7 @@ The frontend focuses on **product clarity, UX, and signal visualization** rather
 
 ---
 
-## Backend
+## Backend (apps/api)
 
 - **FastAPI**
 - **Python**
@@ -103,7 +104,7 @@ I handle correctness.
 ## Getting Started (Backend)
 
 ```bash
-cd backend
+cd apps/api
 
 # Create virtual environment
 python3 -m venv .venv
