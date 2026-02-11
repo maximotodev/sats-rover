@@ -121,6 +121,7 @@ How to fix:
    - disable protection (make previews public), **or**
    - explicitly allow unauthenticated access to required assets/routes.
 4. Re-deploy and verify `/manifest.json` returns `200`.
+5. Ensure `ROVER_ENGINE_URL` is configured for Preview/Production environments (the web API route does not assume localhost outside local development).
 
 Quick sanity checks:
 - Manifest exists: `apps/web/public/manifest.json`

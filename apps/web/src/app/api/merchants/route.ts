@@ -1,7 +1,7 @@
 // apps/web/src/app/api/merchants/route.ts
 import { NextResponse } from "next/server";
 
-const ENGINE_URL = process.env.ROVER_ENGINE_URL || "http://localhost:8000";
+const ENGINE_URL = process.env.ROVER_ENGINE_URL || "";
 const ENGINE_TIMEOUT_MS = Number(process.env.ENGINE_TIMEOUT_MS || 7000);
 const ENGINE_RETRIES = Number(process.env.ENGINE_RETRIES || 1);
 
@@ -150,6 +150,25 @@ type ParsedBbox = {
   maxLat: number;
 };
 
+
+function configError(msg: string): Error {
+  const err = new Error(msg);
+  (err as any).kind = "CONFIG_ERROR";
+  return err;
+}
+
+function resolveEngineUrl(): string {
+  if (ENGINE_URL) return ENGINE_URL;
+
+  if (process.env.NODE_ENV === "development") {
+    return "http://localhost:8000";
+  }
+
+  throw configError(
+    "ROVER_ENGINE_URL is not configured for non-development runtime",
+  );
+}
+
 function badRequest(msg: string): Error {
   const err = new Error(msg);
   (err as any).kind = "BAD_REQUEST";
@@ -226,6 +245,7 @@ async function fetchEngineWithRetry(url: string) {
 
       const err = new Error(`Engine responded ${resp.status}`);
       (err as any).kind = "ENGINE_BAD_RESPONSE";
+      (err as any).attempts = attempt + 1;
       throw err;
     } catch (e: any) {
       clearTimeout(timer);
@@ -235,6 +255,7 @@ async function fetchEngineWithRetry(url: string) {
 
       const err = new Error(e?.message || "fetch failed");
       (err as any).kind = kind;
+      (err as any).attempts = attempt + 1;
       lastError = err;
 
       if (attempt >= maxAttempts - 1) break;
@@ -259,8 +280,9 @@ export async function GET(request: Request) {
     const bbox = parseBbox(rawBbox);
     bboxForLog = `${bbox.minLon},${bbox.minLat},${bbox.maxLon},${bbox.maxLat}`;
 
+    const engineBaseUrl = resolveEngineUrl();
     const url =
-      `${ENGINE_URL}/v1/places?bbox=${encodeURIComponent(bboxForLog)}` +
+      `${engineBaseUrl}/v1/places?bbox=${encodeURIComponent(bboxForLog)}` +
       `&limit=${LIMIT}`;
 
     const { resp, attempts: usedAttempts } = await fetchEngineWithRetry(url);
@@ -313,7 +335,7 @@ export async function GET(request: Request) {
         service: "web-api-merchants",
         requestId: rid,
         bbox: bboxForLog,
-        engineUrl: ENGINE_URL,
+        engineUrl: ENGINE_URL || "<missing>",
         durationMs: Date.now() - startedAt,
         attempts,
         ok: true,
@@ -324,12 +346,17 @@ export async function GET(request: Request) {
   } catch (e: any) {
     const kind = e?.kind || "UNKNOWN";
     const message = e?.message || "Unknown error";
+    attempts = Number.isFinite(e?.attempts) ? e.attempts : attempts;
 
     let status = 502;
     let error = "ENGINE_UNAVAILABLE";
     let details = message;
 
-    if (kind === "ENGINE_BAD_RESPONSE") {
+    if (kind === "CONFIG_ERROR") {
+      status = 500;
+      error = "CONFIG_ERROR";
+      details = message;
+    } else if (kind === "ENGINE_BAD_RESPONSE") {
       status = 502;
       error = "ENGINE_BAD_RESPONSE";
       details = message;
@@ -360,7 +387,7 @@ export async function GET(request: Request) {
         service: "web-api-merchants",
         requestId: rid,
         bbox: bboxForLog,
-        engineUrl: ENGINE_URL,
+        engineUrl: ENGINE_URL || "<missing>",
         durationMs: Date.now() - startedAt,
         attempts,
         ok: false,
