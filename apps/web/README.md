@@ -104,3 +104,30 @@ We do not aggregate trust. We let it form.
 ---
 
 _Built with 🧡 by maximotodev_
+
+## Preview deployment returns 401 for `/manifest.json`
+
+If `GET /manifest.json` returns `401` in Vercel **Preview** deployments, this is usually **not** an app code bug.
+
+Root cause:
+- Vercel Deployment Protection / Vercel Authentication is enabled for Preview deployments.
+- That protection can challenge static assets too (including `/manifest.json`) until authenticated.
+- Middleware or route changes in this app will not fix a protection-level 401.
+
+How to fix:
+1. Open **Vercel Dashboard** → **Project** → **Settings**.
+2. Go to **Deployment Protection** (or **Security / Vercel Authentication**, depending on UI version).
+3. For Preview deployments, either:
+   - disable protection (make previews public), **or**
+   - explicitly allow unauthenticated access to required assets/routes.
+4. Re-deploy and verify `/manifest.json` returns `200`.
+5. Ensure `ROVER_ENGINE_URL` is configured for Preview/Production environments (the web API route does not assume localhost outside local development).
+
+Quick sanity checks:
+- Manifest exists: `apps/web/public/manifest.json`
+- Icon exists (manifest references `/icon.png`): `apps/web/public/icon.png`
+
+Local check command:
+```bash
+test -f apps/web/public/icon.png && echo "icon.png present"
+```

@@ -1,7 +1,9 @@
 // apps/web/src/app/api/merchants/route.ts
 import { NextResponse } from "next/server";
 
-const ENGINE_URL = process.env.ROVER_ENGINE_URL || "http://localhost:8000";
+const ENGINE_URL = process.env.ROVER_ENGINE_URL || "";
+const ENGINE_TIMEOUT_MS = Number(process.env.ENGINE_TIMEOUT_MS || 7000);
+const ENGINE_RETRIES = Number(process.env.ENGINE_RETRIES || 1);
 
 /**
  * Keep payloads small + predictable.
@@ -141,29 +143,150 @@ function toFiniteNumber(v: any): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-export async function GET(request: Request) {
-  const { searchParams } = new URL(request.url);
-  const bbox = searchParams.get("bbox");
+type ParsedBbox = {
+  minLon: number;
+  minLat: number;
+  maxLon: number;
+  maxLat: number;
+};
 
-  if (!bbox) {
-    return NextResponse.json(
-      { data: [], error: "Missing bbox" },
-      { status: 400 },
-    );
+
+function configError(msg: string): Error {
+  const err = new Error(msg);
+  (err as any).kind = "CONFIG_ERROR";
+  return err;
+}
+
+function resolveEngineUrl(): string {
+  if (ENGINE_URL) return ENGINE_URL;
+
+  if (process.env.NODE_ENV === "development") {
+    return "http://localhost:8000";
   }
 
+  throw configError(
+    "ROVER_ENGINE_URL is not configured for non-development runtime",
+  );
+}
+
+function badRequest(msg: string): Error {
+  const err = new Error(msg);
+  (err as any).kind = "BAD_REQUEST";
+  return err;
+}
+
+function parseBbox(raw: string | null): ParsedBbox {
+  if (!raw) {
+    throw badRequest("bbox is required");
+  }
+
+  const parts = raw.split(",").map((x) => x.trim());
+  if (parts.length !== 4) {
+    throw badRequest("bbox must be 4 comma-separated numbers: minLon,minLat,maxLon,maxLat");
+  }
+
+  const nums = parts.map((x) => Number(x));
+  if (nums.some((x) => !Number.isFinite(x))) {
+    throw badRequest("bbox contains invalid numbers");
+  }
+
+  const [minLon, minLat, maxLon, maxLat] = nums;
+
+  if (minLon < -180 || minLon > 180 || maxLon < -180 || maxLon > 180) {
+    throw badRequest("bbox longitude out of range [-180,180]");
+  }
+  if (minLat < -90 || minLat > 90 || maxLat < -90 || maxLat > 90) {
+    throw badRequest("bbox latitude out of range [-90,90]");
+  }
+  if (!(minLon < maxLon && minLat < maxLat)) {
+    throw badRequest("bbox must satisfy minLon < maxLon and minLat < maxLat");
+  }
+
+  return { minLon, minLat, maxLon, maxLat };
+}
+
+function requestId(): string {
+  return Math.random().toString(36).slice(2, 10);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function backoffMs(attempt: number): number {
+  const table = [200, 500];
+  return table[Math.min(attempt, table.length - 1)];
+}
+
+async function fetchEngineWithRetry(url: string) {
+  const maxAttempts = Math.max(1, ENGINE_RETRIES + 1);
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), ENGINE_TIMEOUT_MS);
+
+    try {
+      const resp = await fetch(url, {
+        next: { revalidate: 30 },
+        headers: { accept: "application/json" },
+        signal: ctrl.signal,
+      });
+      clearTimeout(timer);
+
+      if (resp.ok) {
+        return { resp, attempts: attempt + 1 };
+      }
+
+      if (resp.status >= 500 && attempt < maxAttempts - 1) {
+        await sleep(backoffMs(attempt));
+        continue;
+      }
+
+      const err = new Error(`Engine responded ${resp.status}`);
+      (err as any).kind = "ENGINE_BAD_RESPONSE";
+      (err as any).attempts = attempt + 1;
+      throw err;
+    } catch (e: any) {
+      clearTimeout(timer);
+
+      const timedOut = e?.name === "AbortError";
+      const kind = timedOut ? "ENGINE_TIMEOUT" : "ENGINE_UNAVAILABLE";
+
+      const err = new Error(e?.message || "fetch failed");
+      (err as any).kind = kind;
+      (err as any).attempts = attempt + 1;
+      lastError = err;
+
+      if (attempt >= maxAttempts - 1) break;
+
+      await sleep(backoffMs(attempt));
+    }
+  }
+
+  throw lastError || new Error("fetch failed");
+}
+
+export async function GET(request: Request) {
+  const startedAt = Date.now();
+  const rid = requestId();
+  const { searchParams } = new URL(request.url);
+  const rawBbox = searchParams.get("bbox");
+
+  let attempts = 0;
+  let bboxForLog = rawBbox || "";
+
   try {
-    // Prefer engine-side limit; keep HARD_MAX_MERCHANTS as safety belt.
+    const bbox = parseBbox(rawBbox);
+    bboxForLog = `${bbox.minLon},${bbox.minLat},${bbox.maxLon},${bbox.maxLat}`;
+
+    const engineBaseUrl = resolveEngineUrl();
     const url =
-      `${ENGINE_URL}/v1/places?bbox=${encodeURIComponent(bbox)}` +
+      `${engineBaseUrl}/v1/places?bbox=${encodeURIComponent(bboxForLog)}` +
       `&limit=${LIMIT}`;
 
-    const resp = await fetch(url, {
-      next: { revalidate: 30 },
-      headers: { accept: "application/json" },
-    });
-
-    if (!resp.ok) throw new Error(`Engine responded ${resp.status}`);
+    const { resp, attempts: usedAttempts } = await fetchEngineWithRetry(url);
+    attempts = usedAttempts;
 
     const places: Array<{
       id: string;
@@ -176,7 +299,7 @@ export async function GET(request: Request) {
     }> = await resp.json();
 
     const merchants = places
-      .slice(0, HARD_MAX_MERCHANTS) // final clamp in case engine ignores limit
+      .slice(0, HARD_MAX_MERCHANTS)
       .map((p) => {
         const rawTags = p.tags ?? {};
         const category = pickCategoryRaw(rawTags);
@@ -185,7 +308,6 @@ export async function GET(request: Request) {
         const lat = toFiniteNumber(p.lat);
         const lon = toFiniteNumber(p.lon);
 
-        // Skip invalid coordinates to avoid map errors
         if (lat == null || lon == null) return null;
         if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return null;
 
@@ -208,12 +330,75 @@ export async function GET(request: Request) {
       })
       .filter(Boolean);
 
+    console.info(
+      JSON.stringify({
+        service: "web-api-merchants",
+        requestId: rid,
+        bbox: bboxForLog,
+        engineUrl: ENGINE_URL || "<missing>",
+        durationMs: Date.now() - startedAt,
+        attempts,
+        ok: true,
+      }),
+    );
+
     return NextResponse.json({ data: merchants }, { status: 200 });
   } catch (e: any) {
-    console.error("Merchants proxy error:", e?.message || e);
+    const kind = e?.kind || "UNKNOWN";
+    const message = e?.message || "Unknown error";
+    attempts = Number.isFinite(e?.attempts) ? e.attempts : attempts;
+
+    let status = 502;
+    let error = "ENGINE_UNAVAILABLE";
+    let details = message;
+
+    if (kind === "CONFIG_ERROR") {
+      status = 500;
+      error = "CONFIG_ERROR";
+      details = message;
+    } else if (kind === "ENGINE_BAD_RESPONSE") {
+      status = 502;
+      error = "ENGINE_BAD_RESPONSE";
+      details = message;
+    } else if (kind === "ENGINE_TIMEOUT") {
+      status = 504;
+      error = "ENGINE_TIMEOUT";
+      details = message;
+    } else if (kind === "BAD_REQUEST") {
+      status = 400;
+      error = "BAD_REQUEST";
+      details = message;
+    } else if (kind === "ENGINE_UNAVAILABLE") {
+      status = 502;
+      error = "ENGINE_UNAVAILABLE";
+      details = message;
+    } else if (
+      message.includes("bbox") ||
+      message.includes("minLon") ||
+      message.includes("minLat")
+    ) {
+      status = 400;
+      error = "BAD_REQUEST";
+      details = message;
+    }
+
+    console.error(
+      JSON.stringify({
+        service: "web-api-merchants",
+        requestId: rid,
+        bbox: bboxForLog,
+        engineUrl: ENGINE_URL || "<missing>",
+        durationMs: Date.now() - startedAt,
+        attempts,
+        ok: false,
+        errorName: e?.name || "Error",
+        errorMessage: message,
+      }),
+    );
+
     return NextResponse.json(
-      { data: [], error: "Engine Offline" },
-      { status: 200 },
+      { data: [], error, details },
+      { status },
     );
   }
 }
