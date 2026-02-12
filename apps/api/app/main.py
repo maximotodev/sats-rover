@@ -21,6 +21,12 @@ app.add_middleware(
 app.include_router(places_router)
 app.include_router(signals_router)
 
+@app.get("/debug/counts")
+async def debug_counts():
+    async with engine.connect() as conn:
+        places = (await conn.execute(text("SELECT count(*) FROM places"))).scalar_one()
+        signals = (await conn.execute(text("SELECT count(*) FROM signals"))).scalar_one()
+    return {"places": places, "signals": signals}
 
 @app.get("/healthz", tags=["health"])
 async def healthz(response: Response):
