@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { hydrateUserProfile } from "./session-hydration.test-shim.mjs";
+import { hydrateUserProfile } from "../src/lib/session-hydration.js";
 
 let casesExecuted = 0;
 
