@@ -7,8 +7,6 @@ import {
   Bitcoin,
   Navigation,
   KeyRound,
-  Eye,
-  EyeOff,
   ThumbsUp,
   ThumbsDown,
   Meh,
@@ -20,8 +18,12 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useSession } from "@/contexts/NostrSessionContext";
+import { useIdentity } from "@/context/identity-context";
+import { useTransmitSignalFlow } from "@/flows/transmit-signal-flow";
 import { NDKUserProfile } from "@nostr-dev-kit/ndk";
 import { buildAuthHeaders, randomNonce } from "@/lib/authProof";
+import IdentityGateModal from "@/components/modals/IdentityGateModal";
+import WalletGateModal from "@/components/modals/WalletGateModal";
 
 interface MerchantDrawerProps {
   merchant: Merchant | null;
@@ -40,7 +42,7 @@ interface FeedItem {
 
 type CheckinStatusState = "idle" | "pending" | "ok" | "failed" | "not_found";
 
-function tagTruthy(v: any): boolean {
+function tagTruthy(v: unknown): boolean {
   if (v === true) return true;
   if (typeof v === "number") return v === 1;
   if (typeof v === "string") {
@@ -54,18 +56,18 @@ export default function MerchantDrawer({
   merchant,
   onClose,
 }: MerchantDrawerProps) {
-  const { session, loginWithExtension, loginWithNsec, publishSignal, ndk } =
-    useSession();
+  const { session, publishSignal, ndk } = useSession();
+  const { state: identityState } = useIdentity();
+  const transmitSignalFlow = useTransmitSignalFlow();
 
   // Data State
   const [reviews, setReviews] = useState<FeedItem[]>([]);
   const [profiles, setProfiles] = useState<ProfileMap>({});
   const [loadingReviews, setLoadingReviews] = useState(false);
 
-  // Login UI State
-  const [showNsecInput, setShowNsecInput] = useState(false);
-  const [nsec, setNsec] = useState("");
-  const [showSecret, setShowSecret] = useState(false);
+  // Flow Gate UI State
+  const [showIdentityGate, setShowIdentityGate] = useState(false);
+  const [showWalletGate, setShowWalletGate] = useState(false);
 
   // Reporting State
   const [isReporting, setIsReporting] = useState(false);
@@ -163,31 +165,30 @@ export default function MerchantDrawer({
     tagTruthy(merchant?.tags?.["payment:onchain"]);
 
   // Handlers
-  const handleLoginStart = async () => {
-    if ((window as any).nostr) {
-      try {
-        await loginWithExtension();
-      } catch (e) {
-        setShowNsecInput(true);
-      }
-    } else {
-      setShowNsecInput(true);
-    }
-  };
-
-  const handleNsecSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!nsec.startsWith("nsec1")) {
-      alert("Invalid format");
-      return;
-    }
-    await loginWithNsec(nsec);
-    setShowNsecInput(false);
+  const handleLoginStart = () => {
+    setShowIdentityGate(true);
   };
 
   const handleSubmitReport = async () => {
     if (!merchant) return;
     if (checkinStatus === "pending") return;
+
+    if (transmitSignalFlow.nextAction.kind === "need_identity") {
+      setPublishError("reason_code: missing_identity");
+      setShowIdentityGate(true);
+      return;
+    }
+    if (transmitSignalFlow.nextAction.kind === "need_wallet") {
+      setPublishError("reason_code: missing_wallet");
+      setShowWalletGate(true);
+      return;
+    }
+    if (transmitSignalFlow.nextAction.kind === "error") {
+      setPublishError(
+        `reason_code: ${transmitSignalFlow.nextAction.reason || "flow_error"}`,
+      );
+      return;
+    }
 
     setIsPublishing(true);
     setPublishError(null);
@@ -249,15 +250,17 @@ export default function MerchantDrawer({
       });
       const intentData = await intentRes.json();
       intentToken = intentData.intent_token || "";
-    } catch (e: any) {
-      if ((e as Error)?.message === "missing_signer") {
+    } catch (e: unknown) {
+      if (e instanceof Error && e.message === "missing_signer") {
         setPublishError("Missing signer for check-in ownership proof");
       }
       intentToken = "";
     }
 
     // 2) Publish to relays
-    const publishResult = await publishSignal(merchant.id, paymentStatus, comment);
+    const publishResult = await transmitSignalFlow.run(async () =>
+      publishSignal(merchant.id, paymentStatus, comment),
+    );
 
     // 3) Confirm lifecycle with backend
     if (publishResult.ok && intentToken) {
@@ -420,60 +423,15 @@ export default function MerchantDrawer({
             <div className="mb-8 p-1 bg-white/5 rounded-xl border border-white/5">
               {session.type === "anon" ? (
                 // 1. LOGIN REQUIRED
-                showNsecInput ? (
-                  <form
-                    onSubmit={handleNsecSubmit}
-                    className="p-4 animate-in fade-in"
-                  >
-                    <div className="flex justify-between items-center mb-4">
-                      <label className="text-[10px] font-bold text-[#F7931A] uppercase tracking-widest">
-                        Manual Uplink
-                      </label>
-                      <button
-                        type="button"
-                        onClick={() => setShowNsecInput(false)}
-                      >
-                        <X className="w-4 h-4 text-gray-500 hover:text-white" />
-                      </button>
-                    </div>
-                    <div className="relative mb-3">
-                      <input
-                        type={showSecret ? "text" : "password"}
-                        placeholder="nsec1..."
-                        className="w-full bg-black text-sm text-white p-3 pr-10 border border-white/20 rounded focus:border-[#F7931A] focus:outline-none transition-colors font-mono"
-                        value={nsec}
-                        onChange={(e) => setNsec(e.target.value)}
-                      />
-                      <button
-                        type="button"
-                        onClick={() => setShowSecret(!showSecret)}
-                        className="absolute right-3 top-3.5 text-gray-500 hover:text-white"
-                      >
-                        {showSecret ? (
-                          <EyeOff className="w-4 h-4" />
-                        ) : (
-                          <Eye className="w-4 h-4" />
-                        )}
-                      </button>
-                    </div>
-                    <button
-                      type="submit"
-                      className="w-full bg-[#F7931A] text-black text-xs font-bold py-3 rounded uppercase tracking-widest hover:brightness-110"
-                    >
-                      Authenticate
-                    </button>
-                  </form>
-                ) : (
-                  <button
-                    onClick={handleLoginStart}
-                    className="w-full py-6 flex flex-col items-center justify-center gap-2 group"
-                  >
-                    <KeyRound className="w-6 h-6 text-gray-500 group-hover:text-[#F7931A] transition-colors" />
-                    <span className="text-xs uppercase tracking-widest font-bold text-gray-400 group-hover:text-white">
-                      Login to Broadcast
-                    </span>
-                  </button>
-                )
+                <button
+                  onClick={handleLoginStart}
+                  className="w-full py-6 flex flex-col items-center justify-center gap-2 group"
+                >
+                  <KeyRound className="w-6 h-6 text-gray-500 group-hover:text-[#F7931A] transition-colors" />
+                  <span className="text-xs uppercase tracking-widest font-bold text-gray-400 group-hover:text-white">
+                    Login to Broadcast
+                  </span>
+                </button>
               ) : !isReporting ? (
                 // 2. ACTIONS (LOGGED IN)
                 <div className="grid grid-cols-2 gap-1">
@@ -498,6 +456,12 @@ export default function MerchantDrawer({
                   <h4 className="text-xs font-bold text-gray-400 mb-4 uppercase tracking-widest text-center">
                     Confirm Payment Status
                   </h4>
+
+                  {identityState.status !== "ready" && (
+                    <div className="mb-4 p-3 bg-yellow-900/20 border border-yellow-500/30 rounded text-yellow-300 text-xs">
+                      reason_code: missing_identity
+                    </div>
+                  )}
 
                   {publishError && (
                     <div className="mb-4 p-3 bg-red-900/20 border border-red-500/30 rounded text-red-400 text-xs flex items-center gap-2">
@@ -708,6 +672,14 @@ export default function MerchantDrawer({
           </>
         )}
       </div>
+      <IdentityGateModal
+        isOpen={showIdentityGate}
+        onClose={() => setShowIdentityGate(false)}
+      />
+      <WalletGateModal
+        isOpen={showWalletGate}
+        onClose={() => setShowWalletGate(false)}
+      />
     </div>
   );
 }

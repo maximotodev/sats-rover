@@ -1,7 +1,8 @@
 "use client";
 import React, { createContext, useContext } from "react";
 import NDK from "@nostr-dev-kit/ndk";
-import { useNostr, NostrSession } from "@/hooks/use-nostr";
+import { NostrSession } from "@/hooks/use-nostr";
+import { useIdentity } from "@/context/identity-context";
 
 export interface SessionCapabilities {
   canSign: boolean;
@@ -17,7 +18,7 @@ interface NostrSessionContextValue {
   loginWithNsec: (nsec: string, remember?: boolean) => Promise<void>;
   signup: (
     remember?: boolean,
-  ) => Promise<{ nsec: string; user: any } | undefined>;
+  ) => Promise<{ nsec: string; user: { pubkey: string } } | undefined>;
   updateProfile: (name: string, about: string, picture: string) => Promise<void>;
   logout: () => void;
   publishSignal: (
@@ -25,6 +26,7 @@ interface NostrSessionContextValue {
     paymentResult: "success" | "failed" | "did_not_try",
     comment: string,
   ) => Promise<{ ok: boolean; eventId?: string }>;
+  publishClaim: (merchantId: string) => Promise<boolean>;
 }
 
 const NostrSessionContext = createContext<NostrSessionContextValue | null>(
@@ -36,26 +38,27 @@ export function NostrSessionProvider({
 }: {
   children: React.ReactNode;
 }) {
-  const nostr = useNostr();
+  const identity = useIdentity();
 
   const capabilities: SessionCapabilities = {
-    canSign: nostr.session.type !== "anon",
-    canPublish: nostr.session.type !== "anon",
+    canSign: identity.session.type !== "anon",
+    canPublish: identity.session.type !== "anon",
     canPay: true,
   };
 
   return (
     <NostrSessionContext.Provider
       value={{
-        ndk: nostr.ndk,
-        session: nostr.session,
+        ndk: identity.ndk,
+        session: identity.session,
         capabilities,
-        loginWithExtension: nostr.loginWithExtension,
-        loginWithNsec: nostr.loginWithNsec,
-        signup: nostr.signup,
-        updateProfile: nostr.updateProfile,
-        logout: nostr.logout,
-        publishSignal: nostr.publishSignal,
+        loginWithExtension: identity.actions.loginWithNip07,
+        loginWithNsec: identity.actions.loginWithNsec,
+        signup: identity.actions.signup,
+        updateProfile: identity.actions.updateProfile,
+        logout: identity.actions.logout,
+        publishSignal: identity.actions.publishSignal,
+        publishClaim: identity.actions.publishClaim,
       }}
     >
       {children}

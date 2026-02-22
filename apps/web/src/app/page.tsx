@@ -11,16 +11,12 @@ import Sidebar from "@/components/layout/Sidebar";
 import FloatingCommandBar, {
   CommandView,
 } from "@/components/ui/FloatingCommandBar";
-import { useSession } from "@/contexts/NostrSessionContext"; // ✅ CORRECT IMPORT
-import { useLightningEngine } from "@/hooks/use-lightning-engine";
+import { useSession } from "@/contexts/NostrSessionContext";
+import { useWallet } from "@/context/wallet-context";
 
 export default function Home() {
-  // ✅ USE SESSION CONTEXT (Single Source of Truth)
-  const { ndk, session } = useSession();
-
-  // Pass the NDK instance from context to the wallet engine
-  const { status, balance, ignite, disconnect, payInvoice } =
-    useLightningEngine(ndk);
+  const { session } = useSession();
+  const { state, balance, connectNWC, disconnect, payInvoice } = useWallet();
 
   const [view, setView] = useState<CommandView>("idle");
   const [currentHub, setCurrentHub] = useState("Global");
@@ -59,7 +55,7 @@ export default function Home() {
       {/* 2. HUD LAYER */}
       <FloatingCommandBar
         balance={balance}
-        status={status}
+        status={state === "disconnected" ? "idle" : state}
         view={view}
         currentHub={currentHub}
         onSetView={setView}
@@ -81,9 +77,9 @@ export default function Home() {
       <WalletDrawer
         isOpen={view === "wallet"}
         onClose={() => setView("idle")}
-        status={status}
+        status={state === "disconnected" ? "idle" : state}
         balance={balance}
-        onConnect={ignite}
+        onConnect={connectNWC}
         onDisconnect={disconnect}
         onPay={payInvoice}
       />
