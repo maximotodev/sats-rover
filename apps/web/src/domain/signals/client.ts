@@ -3,16 +3,10 @@ import { dedupeAndSortSignalFeed, normalizePlaceFeedResult, normalizeSignalFeedI
 import { mergeSignalFeed, withOptimisticPending } from "./selectors";
 import type { GlobalFeedResult, PlaceFeedResult, SignalFeedItemUI, SignalFeedSource, SignalStatus } from "./types";
 import { logEvent } from "@/lib/observability";
+import { unwrapData } from "./transport";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
-}
-
-export function unwrapData<T>(raw: unknown): T {
-  if (isRecord(raw) && "data" in raw) {
-    return raw.data as T;
-  }
-  return raw as T;
 }
 
 function hasErrorPayload(raw: unknown): string | null {

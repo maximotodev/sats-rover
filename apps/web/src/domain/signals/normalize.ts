@@ -1,9 +1,9 @@
-import {
-  type PlaceFeedItemTransport,
-  type PlaceFeedResult,
-  type SignalFeedItemUI,
-  type SignalFeedSource,
-  type SignalStatus,
+import type {
+  PlaceFeedItemTransport,
+  PlaceFeedResult,
+  SignalFeedItemUI,
+  SignalFeedSource,
+  SignalStatus,
 } from "./types";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
