@@ -24,6 +24,7 @@ export default function Home() {
     lat: number;
     lon: number;
   } | null>(null);
+  const [currentBbox, setCurrentBbox] = useState<string | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
   const handleHubSelect = (lat: number, lon: number, name: string) => {
@@ -46,6 +47,7 @@ export default function Home() {
       <div className="absolute inset-0 z-0 h-dvh w-full">
         <MapView
           flyToCoords={flyToCoords}
+          onBboxChange={setCurrentBbox}
           onInteract={() => {
             setView("idle");
             setIsSidebarOpen(false);
@@ -95,6 +97,7 @@ export default function Home() {
 
       <ActivityDrawer
         isOpen={view === "activity"}
+        bbox={currentBbox}
         onClose={() => setView("idle")}
       />
 

@@ -24,6 +24,11 @@ import { NDKUserProfile } from "@nostr-dev-kit/ndk";
 import { buildAuthHeaders, randomNonce } from "@/lib/authProof";
 import IdentityGateModal from "@/components/modals/IdentityGateModal";
 import WalletGateModal from "@/components/modals/WalletGateModal";
+import {
+  createOptimisticSignalFeedItem,
+  useSignalFeed,
+} from "@/domain/signals/client";
+import { successCount as countSuccessfulSignals } from "@/domain/signals/selectors";
 
 interface MerchantDrawerProps {
   merchant: Merchant | null;
@@ -31,14 +36,6 @@ interface MerchantDrawerProps {
 }
 
 type ProfileMap = Record<string, NDKUserProfile>;
-
-interface FeedItem {
-  event_id: string;
-  pubkey: string;
-  status: "success" | "failed" | "did_not_try";
-  content: string;
-  created_at: string;
-}
 
 type CheckinStatusState = "idle" | "pending" | "ok" | "failed" | "not_found";
 
@@ -61,11 +58,15 @@ export default function MerchantDrawer({
   const { publishSignal } = identity.actions;
   const transmitSignalFlow = useTransmitSignalFlow();
   const gates = useFlowGates();
+  const placeFeed = useSignalFeed({
+    mode: "place",
+    placeId: merchant?.id ?? null,
+    enabled: Boolean(merchant?.id),
+  });
 
   // Data State
-  const [reviews, setReviews] = useState<FeedItem[]>([]);
   const [profiles, setProfiles] = useState<ProfileMap>({});
-  const [loadingReviews, setLoadingReviews] = useState(false);
+  const hydratedPubkeysRef = useRef<Set<string>>(new Set());
 
   // Reporting State
   const [isReporting, setIsReporting] = useState(false);
@@ -82,9 +83,6 @@ export default function MerchantDrawer({
   const [activeCheckinId, setActiveCheckinId] = useState<string | null>(null);
   const pollRunIdRef = useRef(0);
 
-  // Reliability Score
-  const [reliability, setReliability] = useState(0);
-
   // Scroll Ref
   const feedTopRef = useRef<HTMLDivElement>(null);
 
@@ -94,16 +92,13 @@ export default function MerchantDrawer({
     };
   }, []);
 
-  // 1. Fetch Logic (index-backed API first, relay only for profiles)
+  // 1. Feed + profile hydration (index-backed API first, relay only for profiles)
   useEffect(() => {
     const run = async () => {
       if (!merchant) {
-        setReviews([]);
-        setReliability(0);
         return;
       }
 
-      setLoadingReviews(true);
       setIsReporting(false);
       setPaymentStatus("success");
       setComment("");
@@ -111,46 +106,33 @@ export default function MerchantDrawer({
       setCheckinStatus("idle");
       setCheckinReason(null);
       setActiveCheckinId(null);
-
-      try {
-        const resp = await fetch(
-          `/api/places/${encodeURIComponent(merchant.id)}/feed`,
-        );
-        const json = await resp.json();
-        const payload = json?.data;
-        const notes: FeedItem[] = Array.isArray(payload?.items)
-          ? payload.items
-          : [];
-
-        setReviews(notes);
-        const confidence =
-          typeof payload?.confidence_score === "number"
-            ? payload.confidence_score / 100
-            : 0;
-        setReliability(confidence);
-
-        if (notes.length > 0 && ndk) {
-          const uniquePubkeys = Array.from(new Set(notes.map((n) => n.pubkey)));
-          const newProfiles: ProfileMap = {};
-          await Promise.all(
-            uniquePubkeys.map(async (pk) => {
-              const user = ndk.getUser({ pubkey: pk });
-              const profile = await user.fetchProfile();
-              if (profile) newProfiles[pk] = profile;
-            }),
-          );
-          setProfiles((prev) => ({ ...prev, ...newProfiles }));
-        }
-      } catch {
-        setReviews([]);
-        setReliability(0);
-      } finally {
-        setLoadingReviews(false);
-      }
     };
 
     void run();
-  }, [merchant, ndk]);
+  }, [merchant]);
+
+  const reliability = placeFeed.confidenceScore / 100;
+
+  useEffect(() => {
+    const run = async () => {
+      if (!ndk || placeFeed.items.length === 0) return;
+      const uniquePubkeys = Array.from(new Set(placeFeed.items.map((n) => n.pubkey)));
+      const newProfiles: ProfileMap = {};
+      await Promise.all(
+        uniquePubkeys.map(async (pk) => {
+          if (hydratedPubkeysRef.current.has(pk)) return;
+          const user = ndk.getUser({ pubkey: pk });
+          const profile = await user.fetchProfile();
+          hydratedPubkeysRef.current.add(pk);
+          if (profile) newProfiles[pk] = profile;
+        }),
+      );
+      if (Object.keys(newProfiles).length > 0) {
+        setProfiles((prev) => ({ ...prev, ...newProfiles }));
+      }
+    };
+    void run();
+  }, [ndk, placeFeed.items]);
 
   const categoryLabel =
     typeof merchant?.category === "string" && merchant.category
@@ -287,6 +269,15 @@ export default function MerchantDrawer({
         setCheckinStatus("failed");
         setCheckinReason("missing_checkin_id");
       } else {
+        placeFeed.addOptimistic(
+          createOptimisticSignalFeedItem({
+            id: checkinId,
+            placeId: merchant.id,
+            pubkey: session.pubkey || "unknown",
+            status: paymentStatus,
+            content: comment,
+          }),
+        );
         setActiveCheckinId(checkinId);
         await pollCheckinStatus(checkinId);
       }
@@ -298,24 +289,6 @@ export default function MerchantDrawer({
     setIsPublishing(false);
 
     if (publishResult.ok) {
-      // 2. Optimistic UI Update (Show immediately without refetch)
-      const statusEmoji =
-        paymentStatus === "success"
-          ? "✅"
-          : paymentStatus === "failed"
-            ? "❌"
-            : "👀";
-
-      const optimisticNote: FeedItem = {
-        event_id: `opt-${Date.now()}`,
-        pubkey: session.pubkey || "unknown",
-        created_at: new Date().toISOString(),
-        content: `${statusEmoji} ${comment}`,
-        status: paymentStatus,
-      };
-
-      setReviews((prev) => [optimisticNote, ...prev]);
-
       // Add current user profile to map if missing
       if (session.profile && session.pubkey) {
         setProfiles((prev) => ({
@@ -333,6 +306,11 @@ export default function MerchantDrawer({
           block: "center",
         });
       }, 100);
+
+      // Indexer catch-up: refresh feed after confirm roundtrip.
+      setTimeout(() => {
+        void placeFeed.refresh();
+      }, 1200);
     } else {
       setPublishError("Signal failed to reach relays. Please retry.");
       setCheckinStatus("failed");
@@ -340,7 +318,7 @@ export default function MerchantDrawer({
     }
   };
 
-  const successCount = reviews.filter((r) => r.status === "success").length;
+  const successCount = countSuccessfulSignals(placeFeed.items);
 
   return (
     <div
@@ -586,17 +564,17 @@ export default function MerchantDrawer({
                 Signal Feed
               </h3>
 
-              {loadingReviews ? (
+              {placeFeed.loading ? (
                 <div className="text-xs text-[#F7931A] animate-pulse font-mono">
                   Loading indexed signal feed...
                 </div>
-              ) : reviews.length === 0 ? (
+              ) : placeFeed.items.length === 0 ? (
                 <div className="text-xs text-gray-600 font-mono">
                   No signals detected in this sector.
                 </div>
               ) : (
                 <div className="space-y-3">
-                  {reviews.map((note) => {
+                  {placeFeed.items.map((note) => {
                     const profile = profiles[note.pubkey];
                     const name =
                       profile?.name ||
@@ -609,7 +587,7 @@ export default function MerchantDrawer({
 
                     return (
                       <div
-                        key={note.event_id}
+                        key={note.id}
                         className="bg-white/5 border border-white/5 p-3 rounded hover:border-white/10 transition-colors animate-in fade-in slide-in-from-top-2"
                       >
                         <div className="flex items-center gap-3 mb-2">
@@ -631,9 +609,7 @@ export default function MerchantDrawer({
                           </span>
 
                           <span className="text-[9px] text-gray-600 ml-auto font-mono">
-                            {new Date(
-                              new Date(note.created_at).getTime(),
-                            ).toLocaleDateString()}
+                            {new Date(note.createdAtMs).toLocaleDateString()}
                           </span>
                         </div>
 

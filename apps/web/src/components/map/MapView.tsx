@@ -35,9 +35,11 @@ type MerchantFeatureProps = {
 export default function MapView({
   flyToCoords,
   onInteract,
+  onBboxChange,
 }: {
   flyToCoords: FlyToCoords;
   onInteract: () => void;
+  onBboxChange?: (bbox: string) => void;
 }) {
   const mapContainer = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
@@ -90,6 +92,7 @@ export default function MapView({
     const bbox = `${b.getWest().toFixed(4)},${b
       .getSouth()
       .toFixed(4)},${b.getEast().toFixed(4)},${b.getNorth().toFixed(4)}`;
+    onBboxChange?.(bbox);
 
     try {
       const res = await fetch(`/api/merchants?bbox=${bbox}`, {
@@ -109,7 +112,7 @@ export default function MapView({
         console.error("fetchMerchants error:", e);
       }
     }
-  }, []);
+  }, [onBboxChange]);
 
   useEffect(() => {
     if (mapRef.current || !mapContainer.current) return;
