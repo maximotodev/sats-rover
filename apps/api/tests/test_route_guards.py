@@ -9,7 +9,7 @@ from fastapi import HTTPException
 
 from app.api.v1 import checkins as checkins_module
 from app.api.v1.checkins import checkin_confirm, checkin_intent
-from app.schemas.checkin import CheckinConfirmIn
+from app.schemas.signal import CheckinConfirmIn
 
 
 def _b64url_json(value: dict) -> str:

@@ -8,21 +8,72 @@ import re
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, Request, HTTPException
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
-from app.schemas.checkin import (
-    CheckinConfirmIn,
-    CheckinConfirmOut,
-    CheckinIntentOut,
-    CheckinStatusOut,
-)
-from app.services.checkins_service import (
-    confirm_checkin,
-    create_checkin_intent,
-    get_checkin_status,
-)
 from app.services.redis_client import redis_client
+
+# Keep both imports for branch compatibility: origin/main uses signal/signals_service,
+# while PR branches may provide checkin/checkins_service modules.
+try:
+    from app.schemas.checkin import (
+        CheckinConfirmIn,
+        CheckinConfirmOut,
+        CheckinIntentOut,
+        CheckinStatusOut,
+    )
+except ImportError:  # pragma: no cover
+    from app.schemas.signal import (
+        CheckinConfirmIn,
+        CheckinConfirmOut,
+        CheckinIntentOut,
+    )
+
+    class CheckinStatusOut(BaseModel):
+        status: str
+        reason_code: str | None = None
+
+try:
+    from app.services.checkins_service import (
+        confirm_checkin,
+        create_checkin_intent,
+        get_checkin_status,
+    )
+except ImportError:  # pragma: no cover
+    from app.services.signals_service import (
+        confirm_checkin as _confirm_checkin,
+        create_checkin_intent as _create_checkin_intent,
+    )
+
+    async def create_checkin_intent(
+        *,
+        db: AsyncSession,
+        place_id: str,
+        requester_ip: str,
+        requester_ua: str,
+    ) -> Any:
+        return await _create_checkin_intent(place_id=place_id, requester_id=requester_ip)
+
+    async def confirm_checkin(
+        *,
+        db: AsyncSession,
+        checkin_id: str | None,
+        payload: CheckinConfirmIn,
+    ) -> Any:
+        return await _confirm_checkin(payload=payload, intent_token=checkin_id)
+
+    async def get_checkin_status(*, db: AsyncSession, checkin_id: str) -> CheckinStatusOut:
+        raw = await redis_client.get(f"checkin:pending:{checkin_id}")
+        if not raw:
+            return CheckinStatusOut(status="not_found", reason_code="unknown_checkin")
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+        payload = json.loads(raw)
+        status = payload.get("state")
+        if isinstance(status, str):
+            return CheckinStatusOut(status=status, reason_code=None)
+        return CheckinStatusOut(status="pending", reason_code=None)
 
 router = APIRouter(prefix="/v1", tags=["checkins"])
 HEX64_RE = re.compile(r"^[0-9a-fA-F]{64}$")
