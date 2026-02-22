@@ -38,6 +38,8 @@ interface FeedItem {
   created_at: string;
 }
 
+type CheckinStatusState = "idle" | "pending" | "ok" | "failed" | "not_found";
+
 function tagTruthy(v: any): boolean {
   if (v === true) return true;
   if (typeof v === "number") return v === 1;
@@ -75,12 +77,22 @@ export default function MerchantDrawer({
   // UX State
   const [isPublishing, setIsPublishing] = useState(false);
   const [publishError, setPublishError] = useState<string | null>(null);
+  const [checkinStatus, setCheckinStatus] = useState<CheckinStatusState>("idle");
+  const [checkinReason, setCheckinReason] = useState<string | null>(null);
+  const [activeCheckinId, setActiveCheckinId] = useState<string | null>(null);
+  const pollRunIdRef = useRef(0);
 
   // Reliability Score
   const [reliability, setReliability] = useState(0);
 
   // Scroll Ref
   const feedTopRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    return () => {
+      pollRunIdRef.current += 1;
+    };
+  }, []);
 
   // 1. Fetch Logic (index-backed API first, relay only for profiles)
   useEffect(() => {
@@ -96,6 +108,9 @@ export default function MerchantDrawer({
       setPaymentStatus("success");
       setComment("");
       setPublishError(null);
+      setCheckinStatus("idle");
+      setCheckinReason(null);
+      setActiveCheckinId(null);
 
       try {
         const resp = await fetch(
@@ -172,9 +187,45 @@ export default function MerchantDrawer({
 
   const handleSubmitReport = async () => {
     if (!merchant) return;
+    if (checkinStatus === "pending") return;
 
     setIsPublishing(true);
     setPublishError(null);
+    setCheckinStatus("pending");
+    setCheckinReason(null);
+    setActiveCheckinId(null);
+
+    const pollCheckinStatus = async (checkinId: string) => {
+      const runId = ++pollRunIdRef.current;
+      const startedAt = Date.now();
+
+      while (Date.now() - startedAt < 20_000) {
+        if (pollRunIdRef.current !== runId) return;
+        try {
+          const resp = await fetch(
+            `/api/checkins/status?checkin_id=${encodeURIComponent(checkinId)}`,
+            { method: "GET" },
+          );
+          const data = await resp.json().catch(() => null);
+          const status = (data?.status as CheckinStatusState | undefined) || "failed";
+          const reason = (data?.reason_code as string | null | undefined) ?? null;
+          if (status === "ok" || status === "failed" || status === "not_found") {
+            setCheckinStatus(status);
+            setCheckinReason(reason);
+            return;
+          }
+          setCheckinStatus("pending");
+        } catch {
+          // Keep retrying until timeout.
+        }
+        await new Promise((resolve) => setTimeout(resolve, 800));
+      }
+
+      if (pollRunIdRef.current === runId) {
+        setCheckinStatus("failed");
+        setCheckinReason("status_timeout");
+      }
+    };
 
     // 1) Create check-in intent
     let intentToken = "";
@@ -210,8 +261,9 @@ export default function MerchantDrawer({
 
     // 3) Confirm lifecycle with backend
     if (publishResult.ok && intentToken) {
+      const checkinId = publishResult.eventId || "";
       const confirmPayload = {
-        event_id: publishResult.eventId,
+        event_id: checkinId,
         place_id: merchant.id,
         pubkey: session.pubkey,
         payment_evidence: null,
@@ -234,6 +286,16 @@ export default function MerchantDrawer({
         },
         body: confirmBody,
       });
+      if (!checkinId) {
+        setCheckinStatus("failed");
+        setCheckinReason("missing_checkin_id");
+      } else {
+        setActiveCheckinId(checkinId);
+        await pollCheckinStatus(checkinId);
+      }
+    } else if (publishResult.ok) {
+      setCheckinStatus("failed");
+      setCheckinReason("missing_intent_token");
     }
 
     setIsPublishing(false);
@@ -276,6 +338,8 @@ export default function MerchantDrawer({
       }, 100);
     } else {
       setPublishError("Signal failed to reach relays. Please retry.");
+      setCheckinStatus("failed");
+      setCheckinReason("relay_publish_failed");
     }
   };
 
@@ -442,6 +506,50 @@ export default function MerchantDrawer({
                     </div>
                   )}
 
+                  {checkinStatus === "pending" && (
+                    <div className="mb-4 p-3 bg-[#F7931A]/10 border border-[#F7931A]/30 rounded text-[#F7931A] text-xs flex items-center gap-2">
+                      <Loader2 className="w-4 h-4 shrink-0 animate-spin" />
+                      <div>
+                        <div className="font-bold">Verifying check-in...</div>
+                        {activeCheckinId && (
+                          <div className="text-[10px] text-[#F7931A]/80 font-mono mt-1">
+                            {activeCheckinId.slice(0, 12)}...
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {checkinStatus === "ok" && (
+                    <div className="mb-4 p-3 bg-[#00FF41]/10 border border-[#00FF41]/30 rounded text-[#00FF41] text-xs flex items-center gap-2">
+                      <CheckCircle2 className="w-4 h-4 shrink-0" />
+                      Check-in confirmed.
+                    </div>
+                  )}
+
+                  {(checkinStatus === "failed" || checkinStatus === "not_found") && (
+                    <div className="mb-4 p-3 bg-red-900/20 border border-red-500/30 rounded text-red-300 text-xs">
+                      <div className="flex items-center gap-2">
+                        <AlertCircle className="w-4 h-4 shrink-0" />
+                        <span className="font-bold">
+                          Check-in verification {checkinStatus === "not_found" ? "not found" : "failed"}.
+                        </span>
+                      </div>
+                      {checkinReason && (
+                        <div className="mt-2 text-[10px] text-red-300/80 font-mono">
+                          reason_code: {checkinReason}
+                        </div>
+                      )}
+                      <button
+                        onClick={handleSubmitReport}
+                        disabled={isPublishing}
+                        className="mt-3 bg-red-500/20 border border-red-500/40 text-red-200 px-3 py-1.5 rounded text-[10px] uppercase tracking-widest hover:bg-red-500/30 disabled:opacity-50"
+                      >
+                        Retry Check-in
+                      </button>
+                    </div>
+                  )}
+
                   <div className="flex gap-2 mb-4">
                     <button
                       onClick={() => setPaymentStatus("success")}
@@ -497,7 +605,7 @@ export default function MerchantDrawer({
                   <div className="flex gap-2">
                     <button
                       onClick={handleSubmitReport}
-                      disabled={isPublishing}
+                      disabled={isPublishing || checkinStatus === "pending"}
                       className="flex-1 bg-[#F7931A] text-black font-bold py-3 rounded text-xs uppercase tracking-widest hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                     >
                       {isPublishing ? (
@@ -505,7 +613,7 @@ export default function MerchantDrawer({
                       ) : (
                         <Zap className="w-4 h-4 fill-black" />
                       )}
-                      {isPublishing ? "Broadcasting..." : "Transmit Signal"}
+                      {isPublishing ? "Broadcasting..." : checkinStatus === "pending" ? "Verifying..." : "Transmit Signal"}
                     </button>
                     <button
                       onClick={() => setIsReporting(false)}

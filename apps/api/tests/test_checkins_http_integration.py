@@ -116,6 +116,25 @@ class CheckinsHttpIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resp.status_code, 401)
         self.assertEqual(resp.json().get("detail", {}).get("reason_code"), "invalid_auth_proof")
 
+    async def test_status_query_maps_pending_and_ok(self):
+        async def _redis_pending(key: str):
+            return json.dumps({"state": "pending"}).encode("utf-8")
+
+        async def _redis_ok(key: str):
+            return json.dumps({"state": "ok"}).encode("utf-8")
+
+        with patch("app.api.v1.checkins.redis_client.get", new=_redis_pending):
+            pending_resp = await self.client.get("/v1/checkins/status?checkin_id=evt_pending")
+        self.assertEqual(pending_resp.status_code, 200)
+        self.assertEqual(pending_resp.json().get("status"), "pending")
+        self.assertIsNone(pending_resp.json().get("reason_code"))
+
+        with patch("app.api.v1.checkins.redis_client.get", new=_redis_ok):
+            ok_resp = await self.client.get("/v1/checkins/status?checkin_id=evt_ok")
+        self.assertEqual(ok_resp.status_code, 200)
+        self.assertEqual(ok_resp.json().get("status"), "ok")
+        self.assertIsNone(ok_resp.json().get("reason_code"))
+
 
 if __name__ == "__main__":
     unittest.main()

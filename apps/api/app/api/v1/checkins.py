@@ -7,7 +7,7 @@ import json
 import re
 from typing import Any
 
-from fastapi import APIRouter, Depends, Header, Request, HTTPException
+from fastapi import APIRouter, Depends, Header, Query, Request, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -311,6 +311,14 @@ async def checkin_confirm(
         raw_body=raw_body,
     )
     return await confirm_checkin(db=db, checkin_id=x_checkin_id, payload=payload)
+
+
+@router.get("/checkins/status", response_model=CheckinStatusOut)
+async def checkin_status_query(
+    checkin_id: str = Query(..., min_length=1),
+    db: AsyncSession = Depends(get_db),
+):
+    return await get_checkin_status(db=db, checkin_id=checkin_id)
 
 
 @router.get("/checkins/{checkin_id}", response_model=CheckinStatusOut)
