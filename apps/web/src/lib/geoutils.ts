@@ -2,12 +2,7 @@ import ngeohash from "ngeohash";
 import { BITCOIN_HUBS } from "./constants";
 
 // Canonical precisions (DO NOT CHANGE once live)
-export const GEOHASH_EXACT = 7; // ~150m (User Location)
 export const GEOHASH_CITY = 3; // ~150km (City Aggregation)
-
-export function getExactGeohash(lat: number, lon: number): string {
-  return ngeohash.encode(lat, lon, GEOHASH_EXACT);
-}
 
 /**
  * Generates a Deterministic City ID: country-geohashPrefix
