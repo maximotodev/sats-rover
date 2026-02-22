@@ -1,56 +1,43 @@
-# dependencies
-node_modules/
-dist/
-.pnp
-.pnp.js
-
-# next.js (Ignore in any workspace)
-.next/
-out/
-
-# turbo
-.turbo/
-
-# production/build
-build/
-
-# misc
-.DS_Store
-*.pem
-*.tsbuildinfo############################
-# Dependencies
+############################
+# Dependencies (Node)
 ############################
 node_modules/
 .pnp
 .pnp.js
 
 ############################
-# Build Outputs
+# Build outputs
 ############################
 dist/
 build/
 out/
-
-# Next.js (ignore everywhere, including workspaces)
 .next/
-
-# Turborepo
 .turbo/
 
 ############################
-# Environment / Secrets
+# Logs
 ############################
-.env*
-!.env.example
-
-############################
-# Logs / Debug
-############################
+*.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
-*.log
+
+############################
+# OS / Editor junk
+############################
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+############################
+# Secrets / env (security-first)
+############################
+.env
+.env.*
+!.env.example
+!**/.env.example
 
 ############################
 # TypeScript
@@ -66,69 +53,9 @@ __pycache__/
 *$py.class
 .pytest_cache/
 .venv/
-
-############################
-# Backend-specific
-############################
-backend/.venv/
-backend/__pycache__/
-backend/*.pyc
-backend/.env
-
-############################
-# Frontend-specific
-############################
-frontend/node_modules/
-frontend/.next/
-frontend/out/
-frontend/build/
-frontend/.env.local
+venv/
 
 ############################
 # Vercel
 ############################
 .vercel
-
-############################
-# OS / Editor Junk
-############################
-.DS_Store
-Thumbs.db
-*.pem
-
-next-env.d.ts
-
-# debug
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-.pnpm-debug.log*
-
-# env files (Security First)
-.env*
-!.env.example
-
-# vercel
-.vercel
-
-# python / alembic
-__pycache__/
-*.py[cod]
-*$py.class
-.pytest_cache/
-
-# Python
-backend/.venv/
-backend/__pycache__/
-backend/*.pyc
-backend/.env
-
-# Node
-frontend/node_modules/
-frontend/.next/
-frontend/out/
-frontend/build/
-frontend/.env.local
-
-# OS
-.DS_Store
