@@ -1,3 +1,4 @@
+// apps/web/src/context/identity-context.tsx
 "use client";
 
 import React, { createContext, useContext, useMemo, useState } from "react";
@@ -63,7 +64,11 @@ export function IdentityProvider({ children }: { children: React.ReactNode }) {
   };
 
   const value = useMemo<IdentityContextValue>(() => {
-    const status = mapIdentityStatus(nostr.session.type, isAuthenticating, error);
+    const status = mapIdentityStatus(
+      nostr.session.type,
+      isAuthenticating,
+      error,
+    );
     const signerType: SignerType =
       nostr.session.type === "nip07"
         ? "nip07"
@@ -85,7 +90,8 @@ export function IdentityProvider({ children }: { children: React.ReactNode }) {
         loginWithNip07: () => withAuthState(nostr.loginWithExtension),
         loginWithNsec: (nsec: string, remember?: boolean) =>
           withAuthState(() => nostr.loginWithNsec(nsec, remember)),
-        signup: (remember?: boolean) => withAuthState(() => nostr.signup(remember)),
+        signup: (remember?: boolean) =>
+          withAuthState(() => nostr.signup(remember)),
         logout: () => {
           setError(null);
           nostr.logout();
@@ -97,7 +103,11 @@ export function IdentityProvider({ children }: { children: React.ReactNode }) {
     };
   }, [nostr, isAuthenticating, error]);
 
-  return <IdentityContext.Provider value={value}>{children}</IdentityContext.Provider>;
+  return (
+    <IdentityContext.Provider value={value}>
+      {children}
+    </IdentityContext.Provider>
+  );
 }
 
 export function useIdentity() {

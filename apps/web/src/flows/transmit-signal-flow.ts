@@ -1,3 +1,4 @@
+// apps/web/src/flows/transmit-signal-flow.ts
 "use client";
 
 import { useMemo } from "react";
@@ -30,7 +31,7 @@ export function useTransmitSignalFlow() {
     [identityState.status, walletState],
   );
 
-  const run = async <T,>(fn: () => Promise<T>): Promise<T> => {
+  const run = async <T>(fn: () => Promise<T>): Promise<T> => {
     const action = decideTransmitSignalNextAction({
       identityStatus: identityState.status,
       walletState,

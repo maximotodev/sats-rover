@@ -1,6 +1,14 @@
+// apps/web/src/context/wallet-context.tsx
 "use client";
 
-import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
+import React, {
+  createContext,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useCallback } from "react";
 import { NDKNWCWallet as NDKNwc } from "@nostr-dev-kit/wallet";
 import { useSession } from "@/contexts/NostrSessionContext";
@@ -20,9 +28,16 @@ interface WalletContextValue {
   connectionInfo?: WalletConnectionInfo;
   balance: number | null;
   error?: string;
-  connectNWC: (nwcUrl: string, options?: { relayHint?: string }) => Promise<void>;
+  connectNWC: (
+    nwcUrl: string,
+    options?: { relayHint?: string },
+  ) => Promise<void>;
   disconnect: () => void;
-  getStatus: () => { state: WalletState; provider: "nwc"; reason_code?: string };
+  getStatus: () => {
+    state: WalletState;
+    provider: "nwc";
+    reason_code?: string;
+  };
   payInvoice: (
     bolt11: string,
     opts?: Record<string, unknown>,
@@ -35,15 +50,18 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   const { ndk } = useSession();
   const [state, setState] = useState<WalletState>("disconnected");
   const [balance, setBalance] = useState<number | null>(null);
-  const [connectionInfo, setConnectionInfo] = useState<WalletConnectionInfo | undefined>();
+  const [connectionInfo, setConnectionInfo] = useState<
+    WalletConnectionInfo | undefined
+  >();
   const [error, setError] = useState<string | undefined>();
   const walletRef = useRef<NDKNwc | null>(null);
 
   const checkBalance = async (instance: NDKNwc) => {
     try {
       await instance.updateBalance();
-      const maybeBalance = (instance as unknown as { balance?: { amount?: number } })
-        .balance;
+      const maybeBalance = (
+        instance as unknown as { balance?: { amount?: number } }
+      ).balance;
       if (typeof maybeBalance?.amount === "number") {
         setBalance(maybeBalance.amount);
       }
@@ -122,7 +140,8 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
-    if (typeof window === "undefined" || !ndk || state !== "disconnected") return;
+    if (typeof window === "undefined" || !ndk || state !== "disconnected")
+      return;
     const stored = sessionStorage.getItem(getNwcStorageKey());
     if (!stored) return;
     let cancelled = false;
@@ -155,7 +174,9 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     [state, connectionInfo, balance, error, connectNWC, disconnect, payInvoice],
   );
 
-  return <WalletContext.Provider value={value}>{children}</WalletContext.Provider>;
+  return (
+    <WalletContext.Provider value={value}>{children}</WalletContext.Provider>
+  );
 }
 
 export function useWallet() {

@@ -18,8 +18,8 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useSession } from "@/contexts/NostrSessionContext";
-import { useIdentity } from "@/context/identity-context";
 import { useTransmitSignalFlow } from "@/flows/transmit-signal-flow";
+import { useFlowGates } from "@/flows/gates";
 import { NDKUserProfile } from "@nostr-dev-kit/ndk";
 import { buildAuthHeaders, randomNonce } from "@/lib/authProof";
 import IdentityGateModal from "@/components/modals/IdentityGateModal";
@@ -57,17 +57,13 @@ export default function MerchantDrawer({
   onClose,
 }: MerchantDrawerProps) {
   const { session, publishSignal, ndk } = useSession();
-  const { state: identityState } = useIdentity();
   const transmitSignalFlow = useTransmitSignalFlow();
+  const gates = useFlowGates();
 
   // Data State
   const [reviews, setReviews] = useState<FeedItem[]>([]);
   const [profiles, setProfiles] = useState<ProfileMap>({});
   const [loadingReviews, setLoadingReviews] = useState(false);
-
-  // Flow Gate UI State
-  const [showIdentityGate, setShowIdentityGate] = useState(false);
-  const [showWalletGate, setShowWalletGate] = useState(false);
 
   // Reporting State
   const [isReporting, setIsReporting] = useState(false);
@@ -166,27 +162,23 @@ export default function MerchantDrawer({
 
   // Handlers
   const handleLoginStart = () => {
-    setShowIdentityGate(true);
+    gates.openForAction({ kind: "need_identity", reason: "missing_identity" });
   };
 
   const handleSubmitReport = async () => {
     if (!merchant) return;
     if (checkinStatus === "pending") return;
 
-    if (transmitSignalFlow.nextAction.kind === "need_identity") {
-      setPublishError("reason_code: missing_identity");
-      setShowIdentityGate(true);
-      return;
-    }
-    if (transmitSignalFlow.nextAction.kind === "need_wallet") {
-      setPublishError("reason_code: missing_wallet");
-      setShowWalletGate(true);
-      return;
-    }
-    if (transmitSignalFlow.nextAction.kind === "error") {
-      setPublishError(
-        `reason_code: ${transmitSignalFlow.nextAction.reason || "flow_error"}`,
-      );
+    const nextAction = transmitSignalFlow.nextAction;
+    if (nextAction.kind !== "run") {
+      if (nextAction.kind === "need_wallet") {
+        setPublishError("reason_code: flow_unexpected_wallet_gate");
+        return;
+      }
+      if (nextAction.kind === "need_identity") {
+        gates.openForAction(nextAction);
+      }
+      setPublishError(`reason_code: ${nextAction.reason || "flow_error"}`);
       return;
     }
 
@@ -457,12 +449,6 @@ export default function MerchantDrawer({
                     Confirm Payment Status
                   </h4>
 
-                  {identityState.status !== "ready" && (
-                    <div className="mb-4 p-3 bg-yellow-900/20 border border-yellow-500/30 rounded text-yellow-300 text-xs">
-                      reason_code: missing_identity
-                    </div>
-                  )}
-
                   {publishError && (
                     <div className="mb-4 p-3 bg-red-900/20 border border-red-500/30 rounded text-red-400 text-xs flex items-center gap-2">
                       <AlertCircle className="w-4 h-4 shrink-0" />
@@ -673,12 +659,12 @@ export default function MerchantDrawer({
         )}
       </div>
       <IdentityGateModal
-        isOpen={showIdentityGate}
-        onClose={() => setShowIdentityGate(false)}
+        isOpen={gates.identityOpen}
+        onClose={gates.closeIdentity}
       />
       <WalletGateModal
-        isOpen={showWalletGate}
-        onClose={() => setShowWalletGate(false)}
+        isOpen={gates.walletOpen}
+        onClose={gates.closeWallet}
       />
     </div>
   );

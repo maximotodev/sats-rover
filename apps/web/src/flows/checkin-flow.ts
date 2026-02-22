@@ -1,3 +1,4 @@
+// apps/web/src/flows/checkin-flow.ts
 "use client";
 
 import { useMemo } from "react";
@@ -26,7 +27,9 @@ export function decideCheckinNextAction(input: {
   );
 }
 
-export function useCheckinFlow(options?: { walletRequirement?: FlowWalletRequirement }) {
+export function useCheckinFlow(options?: {
+  walletRequirement?: FlowWalletRequirement;
+}) {
   const { state: identityState } = useIdentity();
   const { state: walletState } = useWallet();
   const walletRequirement = options?.walletRequirement || "optional";
@@ -41,7 +44,7 @@ export function useCheckinFlow(options?: { walletRequirement?: FlowWalletRequire
     [identityState.status, walletState, walletRequirement],
   );
 
-  const run = async <T,>(fn: () => Promise<T>): Promise<T> => {
+  const run = async <T>(fn: () => Promise<T>): Promise<T> => {
     const action = decideCheckinNextAction({
       identityStatus: identityState.status,
       walletState,

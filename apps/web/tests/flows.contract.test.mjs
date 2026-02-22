@@ -23,4 +23,10 @@ test("transmit signal flow requires identity first and never wallet", () => {
   });
 
   assert.equal(readyDecision.kind, "run");
+
+  const readyWithWalletError = evaluateFlowRequirement(transmitRequirement, {
+    identityStatus: "ready",
+    walletState: "error",
+  });
+  assert.notEqual(readyWithWalletError.kind, "need_wallet");
 });
