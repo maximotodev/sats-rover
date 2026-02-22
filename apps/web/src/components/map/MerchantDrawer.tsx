@@ -21,6 +21,7 @@ import {
 import { cn } from "@/lib/utils";
 import { useSession } from "@/contexts/NostrSessionContext";
 import { NDKUserProfile } from "@nostr-dev-kit/ndk";
+import { buildAuthHeaders, randomNonce } from "@/lib/authProof";
 
 interface MerchantDrawerProps {
   merchant: Merchant | null;
@@ -178,14 +179,29 @@ export default function MerchantDrawer({
     // 1) Create check-in intent
     let intentToken = "";
     try {
+      const intentAuth = await buildAuthHeaders({
+        pubkey: session.pubkey || "",
+        method: "POST",
+        path: "/v1/checkins/intent",
+        nonce: randomNonce(),
+        bodyBytes: new Uint8Array(),
+      });
       const intentRes = await fetch("/api/checkins/intent", {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+          "x-pubkey": session.pubkey || "",
+          "x-auth-event": intentAuth.authEvent,
+          "x-auth-nonce": intentAuth.nonce,
+        },
         body: JSON.stringify({ placeId: merchant.id }),
       });
       const intentData = await intentRes.json();
       intentToken = intentData.intent_token || "";
-    } catch {
+    } catch (e: any) {
+      if ((e as Error)?.message === "missing_signer") {
+        setPublishError("Missing signer for check-in ownership proof");
+      }
       intentToken = "";
     }
 
@@ -194,17 +210,29 @@ export default function MerchantDrawer({
 
     // 3) Confirm lifecycle with backend
     if (publishResult.ok && intentToken) {
+      const confirmPayload = {
+        event_id: publishResult.eventId,
+        place_id: merchant.id,
+        pubkey: session.pubkey,
+        payment_evidence: null,
+      };
+      const confirmBody = JSON.stringify(confirmPayload);
+      const confirmAuth = await buildAuthHeaders({
+        pubkey: session.pubkey || "",
+        method: "POST",
+        path: "/v1/checkins/confirm",
+        nonce: randomNonce(),
+        bodyBytes: new TextEncoder().encode(confirmBody),
+      });
       await fetch("/api/checkins/confirm", {
         method: "POST",
         headers: {
           "content-type": "application/json",
           "x-checkin-intent": intentToken,
+          "x-auth-event": confirmAuth.authEvent,
+          "x-auth-nonce": confirmAuth.nonce,
         },
-        body: JSON.stringify({
-          eventId: publishResult.eventId,
-          placeId: merchant.id,
-          pubkey: session.pubkey,
-        }),
+        body: confirmBody,
       });
     }
 
