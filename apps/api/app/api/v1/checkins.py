@@ -69,9 +69,71 @@ def _normalize_pubkey(pubkey: str | None) -> str | None:
     return pubkey.lower()
 
 
-def _verify_auth_event(event: dict) -> bool:
-    # PR2 route-level ownership wiring only; crypto verification is intentionally stubbed here.
-    return False
+def _compute_event_id(event: dict[str, Any]) -> str:
+    serialized = json.dumps(
+        [
+            0,
+            event["pubkey"],
+            event["created_at"],
+            event["kind"],
+            event["tags"],
+            event.get("content", ""),
+        ],
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _load_public_key_xonly():
+    from coincurve import PublicKeyXOnly
+
+    return PublicKeyXOnly
+
+
+def verify_event_signature(event: dict[str, Any]) -> bool:
+    pubkey = event.get("pubkey")
+    sig = event.get("sig")
+    if not isinstance(pubkey, str) or not HEX64_RE.fullmatch(pubkey):
+        return False
+    if not isinstance(sig, str) or len(sig) != 128 or not re.fullmatch(r"[0-9a-fA-F]{128}", sig):
+        return False
+
+    if event.get("kind") != AUTH_KIND:
+        return False
+    if not isinstance(event.get("created_at"), int):
+        return False
+    if not isinstance(event.get("tags"), list):
+        return False
+    if not isinstance(event.get("content", ""), str):
+        return False
+
+    try:
+        computed_id = _compute_event_id(event)
+    except Exception:
+        return False
+
+    provided_id = event.get("id")
+    if provided_id is not None:
+        if not isinstance(provided_id, str) or not HEX64_RE.fullmatch(provided_id):
+            return False
+        if provided_id.lower() != computed_id:
+            return False
+
+    try:
+        PublicKeyXOnly = _load_public_key_xonly()
+    except ImportError as exc:
+        raise _http_error(503, "auth_verifier_unavailable", "Auth verifier unavailable") from exc
+
+    try:
+        verifier = PublicKeyXOnly(bytes.fromhex(pubkey))
+        return bool(verifier.verify(bytes.fromhex(sig), bytes.fromhex(computed_id)))
+    except Exception:
+        return False
+
+
+def _verify_auth_event(event: dict[str, Any]) -> bool:
+    return verify_event_signature(event)
 
 
 async def _consume_checkins_nonce_once(scope: str, nonce: str, ttl_seconds: int = 120) -> None:

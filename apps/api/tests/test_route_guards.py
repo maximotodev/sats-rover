@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 from fastapi import HTTPException
 
+from app.api.v1 import checkins as checkins_module
 from app.api.v1.checkins import checkin_confirm, checkin_intent
 from app.schemas.checkin import CheckinConfirmIn
 
@@ -18,6 +19,36 @@ def _b64url_json(value: dict) -> str:
 
 def _sha256(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
+
+
+def _compute_event_id(event: dict) -> str:
+    payload = [0, event["pubkey"], event["created_at"], event["kind"], event["tags"], event.get("content", "")]
+    raw = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _build_signed_event(method: str, path: str, body: bytes, nonce: str):
+    from coincurve import PrivateKey
+
+    pk = PrivateKey(b"\x11" * 32)
+    pubkey_hex = pk.public_key.format(compressed=True)[1:].hex()
+    event = {
+        "kind": 27235,
+        "pubkey": pubkey_hex,
+        "created_at": int(time.time()),
+        "tags": [
+            ["sr", "auth", "1"],
+            ["method", method],
+            ["path", path],
+            ["nonce", nonce],
+            ["body", _sha256(body)],
+        ],
+        "content": "",
+    }
+    event_id = _compute_event_id(event)
+    event["id"] = event_id
+    event["sig"] = pk.sign_schnorr(bytes.fromhex(event_id), aux_randomness=b"\x00" * 32).hex()
+    return event, pubkey_hex
 
 
 class _DummyClient:
@@ -182,31 +213,39 @@ class CheckinsAuthRouteGuardsTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_intent_valid_proof_allows_service(self):
         req = _DummyRequest("POST", "/v1/checkins/intent", b"", headers={"user-agent": "pytest"})
-        event = {
-            "kind": 27235,
-            "pubkey": "a" * 64,
-            "created_at": int(time.time()),
-            "tags": [
-                ["sr", "auth", "1"],
-                ["method", "POST"],
-                ["path", "/v1/checkins/intent"],
-                ["nonce", "nonce12345"],
-                ["body", _sha256(b"")],
-            ],
-            "content": "",
-            "sig": "f" * 128,
-        }
+        event, pubkey_hex = _build_signed_event("POST", "/v1/checkins/intent", b"", "nonce12345")
         req.headers["x-auth-event"] = _b64url_json(event)
         req.headers["x-auth-nonce"] = "nonce12345"
         create_intent = AsyncMock(
             return_value={"checkin_id": "ci_1", "place_id": "sr:demo:1", "state": "issued", "expires_at": "2026-01-01T00:00:00Z"}
         )
-        with patch("app.api.v1.checkins._verify_auth_event", return_value=True), patch(
-            "app.api.v1.checkins._consume_checkins_nonce_once",
+        with patch("app.api.v1.checkins._consume_checkins_nonce_once",
             new=AsyncMock(return_value=None),
         ), patch("app.api.v1.checkins.create_checkin_intent", create_intent):
-            await checkin_intent("sr:demo:1", req, x_pubkey="a" * 64, db=AsyncMock())
+            await checkin_intent("sr:demo:1", req, x_pubkey=pubkey_hex, db=AsyncMock())
         create_intent.assert_awaited_once()
+
+    async def test_intent_invalid_signature_rejected(self):
+        req = _DummyRequest("POST", "/v1/checkins/intent", b"", headers={"user-agent": "pytest"})
+        event, pubkey_hex = _build_signed_event("POST", "/v1/checkins/intent", b"", "nonce12345")
+        event["sig"] = ("0" if event["sig"][0] != "0" else "1") + event["sig"][1:]
+        req.headers["x-auth-event"] = _b64url_json(event)
+        req.headers["x-auth-nonce"] = "nonce12345"
+        with self.assertRaises(HTTPException) as ctx:
+            await checkin_intent("sr:demo:1", req, x_pubkey=pubkey_hex, db=AsyncMock())
+        self.assertEqual(ctx.exception.status_code, 401)
+        self.assertEqual(ctx.exception.detail["reason_code"], "invalid_auth_proof")
+
+    async def test_intent_verifier_unavailable_rejected(self):
+        req = _DummyRequest("POST", "/v1/checkins/intent", b"", headers={"user-agent": "pytest"})
+        event, pubkey_hex = _build_signed_event("POST", "/v1/checkins/intent", b"", "nonce12345")
+        req.headers["x-auth-event"] = _b64url_json(event)
+        req.headers["x-auth-nonce"] = "nonce12345"
+        with patch.object(checkins_module, "_load_public_key_xonly", side_effect=ImportError("missing")):
+            with self.assertRaises(HTTPException) as ctx:
+                await checkin_intent("sr:demo:1", req, x_pubkey=pubkey_hex, db=AsyncMock())
+        self.assertEqual(ctx.exception.status_code, 503)
+        self.assertEqual(ctx.exception.detail["reason_code"], "auth_verifier_unavailable")
 
 
 if __name__ == "__main__":
