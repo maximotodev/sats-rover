@@ -1,8 +1,8 @@
 import unittest
 
 from pydantic import ValidationError
-
-from app.schemas.signal import CheckinConfirmIn, PlaceFeedOut
+from app.schemas.checkin import CheckinConfirmIn
+from app.schemas.signal import PlaceFeedOut
 from app.services.places_service import parse_bbox
 
 
