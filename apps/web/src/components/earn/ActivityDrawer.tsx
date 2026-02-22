@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Activity, Radio, X, Loader2, Zap, MapPin } from "lucide-react";
+import { Radio, X, Loader2, Zap, MapPin } from "lucide-react";
 import { useIdentity } from "@/context/identity-context";
 import { NDKUserProfile } from "@nostr-dev-kit/ndk";
 
@@ -37,6 +37,7 @@ export default function ActivityDrawer({
 
   useEffect(() => {
     if (isOpen && ndk) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- toggles loading for async fetch lifecycle
       setLoading(true);
       ndk
         .fetchEvents({

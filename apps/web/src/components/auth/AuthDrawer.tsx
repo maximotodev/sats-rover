@@ -7,7 +7,6 @@ import {
   Check,
   ShieldAlert,
   ArrowRight,
-  Upload,
 } from "lucide-react";
 import { useIdentity } from "@/context/identity-context";
 
@@ -50,6 +49,7 @@ export default function AuthDrawer({ isOpen, onClose }: AuthDrawerProps) {
   // Reset on open
   useEffect(() => {
     if (isOpen) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- reset transient drawer state when modal opens
       setStep("menu");
       setNsecInput("");
       setCreatedNsec(null);

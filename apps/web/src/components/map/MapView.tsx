@@ -22,6 +22,15 @@ const EMPTY_FC: GeoJSON.FeatureCollection<GeoJSON.Point> = {
 };
 
 type FlyToCoords = { lat: number; lon: number } | null;
+type MerchantSource = "sr" | "btcmap" | "osm";
+type MerchantFeatureProps = {
+  id: string;
+  name: string;
+  category: string;
+  source: MerchantSource;
+  signalStrength: number;
+  tags: string;
+};
 
 export default function MapView({
   flyToCoords,
@@ -40,7 +49,7 @@ export default function MapView({
 
   const merchantsToFC = (
     merchants: Merchant[],
-  ): GeoJSON.FeatureCollection<GeoJSON.Point, any> => ({
+  ): GeoJSON.FeatureCollection<GeoJSON.Point, MerchantFeatureProps> => ({
     type: "FeatureCollection",
     features: merchants.map((m) => ({
       type: "Feature",
@@ -95,8 +104,8 @@ export default function MapView({
       const merchants: Merchant[] = json?.data ?? [];
 
       src.setData(merchantsToFC(merchants));
-    } catch (e: any) {
-      if (e?.name !== "AbortError") {
+    } catch (e: unknown) {
+      if (!(e instanceof Error) || e.name !== "AbortError") {
         console.error("fetchMerchants error:", e);
       }
     }
@@ -203,7 +212,7 @@ export default function MapView({
         const source = map.getSource(SOURCE_ID) as maplibregl.GeoJSONSource;
         try {
           const zoom = await source.getClusterExpansionZoom(clusterId);
-          const [lng, lat] = (f.geometry as any).coordinates as [
+          const [lng, lat] = (f.geometry as GeoJSON.Point).coordinates as [
             number,
             number,
           ];
@@ -218,7 +227,10 @@ export default function MapView({
         const f = e.features?.[0];
         if (!f) return;
 
-        const [lon, lat] = (f.geometry as any).coordinates as [number, number];
+        const [lon, lat] = (f.geometry as GeoJSON.Point).coordinates as [
+          number,
+          number,
+        ];
 
         const tags = (() => {
           try {
@@ -234,7 +246,12 @@ export default function MapView({
           lat,
           lon,
           category: String(f.properties?.category ?? "merchant"),
-          source: (f.properties?.source ?? "btcmap") as any,
+          source:
+            f.properties?.source === "sr" ||
+            f.properties?.source === "osm" ||
+            f.properties?.source === "btcmap"
+              ? f.properties.source
+              : "btcmap",
           signalStrength: Number(f.properties?.signalStrength ?? 0.5),
           tags,
         };

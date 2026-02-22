@@ -5,7 +5,7 @@ export interface Merchant {
   lat: number;
   lon: number;
   category: string;
-  tags: Record<string, any>;
+  tags: Record<string, unknown>;
   source: "osm" | "btcmap" | "sr";
   signalStrength: number; // derived from glow_score
   lastActivity?: number;

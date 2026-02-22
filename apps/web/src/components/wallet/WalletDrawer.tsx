@@ -18,7 +18,7 @@ interface WalletDrawerProps {
   balance: number | null;
   onConnect: (str: string) => void;
   onDisconnect: () => void;
-  onPay: (invoice: string) => Promise<any>;
+  onPay: (invoice: string) => Promise<unknown>;
 }
 
 export default function WalletDrawer({
@@ -48,7 +48,7 @@ export default function WalletDrawer({
       setPaymentResult("success");
       setInvoice("");
       setTimeout(() => setPaymentResult(null), 3000);
-    } catch (e) {
+    } catch (_error) {
       setPaymentResult("error");
     } finally {
       setPaying(false);

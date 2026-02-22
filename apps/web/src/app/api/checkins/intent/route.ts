@@ -37,9 +37,10 @@ export async function POST(request: Request) {
 
     const data = await resp.json().catch(() => null);
     return NextResponse.json(data ?? { message: "Intent request failed" }, { status: resp.status });
-  } catch (e: any) {
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : "Intent request failed";
     return NextResponse.json(
-      { error: e?.message || "Intent request failed" },
+      { error: message },
       { status: 500 },
     );
   }

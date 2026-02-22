@@ -29,9 +29,10 @@ export async function GET(request: Request) {
       data ?? { message: "Status request failed" },
       { status: resp.status },
     );
-  } catch (e: any) {
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : "Status request failed";
     return NextResponse.json(
-      { error: e?.message || "Status request failed" },
+      { error: message },
       { status: 500 },
     );
   }

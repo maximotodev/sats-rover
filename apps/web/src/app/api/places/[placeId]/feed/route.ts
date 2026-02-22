@@ -26,9 +26,10 @@ export async function GET(
 
     const data = await resp.json();
     return NextResponse.json({ data }, { status: 200 });
-  } catch (e: any) {
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : "Feed unavailable";
     return NextResponse.json(
-      { error: e?.message || "Feed unavailable" },
+      { error: message },
       { status: 200 },
     );
   }

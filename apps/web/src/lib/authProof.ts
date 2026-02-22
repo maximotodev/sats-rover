@@ -18,6 +18,12 @@ type BuildAuthEventInput = {
   bodyBytes: Uint8Array;
 };
 
+type NostrSigner = {
+  signEvent: (
+    event: Omit<AuthEvent, "id" | "sig">,
+  ) => Promise<Partial<AuthEvent> & { id?: unknown; sig?: unknown; pubkey?: unknown }>;
+};
+
 function isHex(value: unknown, len: number): value is string {
   return (
     typeof value === "string" &&
@@ -81,14 +87,15 @@ async function nostrEventIdHex(event: {
 async function signWithNip07(
   template: Omit<AuthEvent, "id" | "sig">,
 ): Promise<AuthEvent | null> {
-  const nostr = (window as any)?.nostr;
+  const nostr = (globalThis.window as Window & { nostr?: NostrSigner } | undefined)?.nostr;
   if (!nostr || typeof nostr.signEvent !== "function") return null;
   const signed = await nostr.signEvent(template);
   if (
     !signed ||
     !isHex(signed.id, 64) ||
     !isHex(signed.sig, 128) ||
-    !isHex(signed.pubkey, 64)
+    !isHex(signed.pubkey, 64) ||
+    !Array.isArray(signed.tags)
   ) {
     throw new Error("invalid_nip07_signature");
   }
@@ -98,7 +105,7 @@ async function signWithNip07(
     pubkey: signed.pubkey.toLowerCase(),
     created_at: Number(signed.created_at),
     kind: 27235,
-    tags: signed.tags,
+    tags: signed.tags as string[][],
     content: signed.content ?? "",
   };
 }

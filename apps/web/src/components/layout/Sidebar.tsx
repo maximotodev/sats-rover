@@ -162,7 +162,13 @@ export default function Sidebar({ isOpen, onClose, onNavigate }: SidebarProps) {
   );
 }
 
-function MenuItem({ icon: Icon, label, onClick }: any) {
+interface MenuItemProps {
+  icon: React.ComponentType<{ className?: string }>;
+  label: string;
+  onClick: () => void;
+}
+
+function MenuItem({ icon: Icon, label, onClick }: MenuItemProps) {
   return (
     <button
       onClick={onClick}

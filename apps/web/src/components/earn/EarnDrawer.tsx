@@ -17,6 +17,7 @@ export default function EarnDrawer({ isOpen, onClose }: EarnDrawerProps) {
   // Fetch real user stats from Nostr when drawer opens
   useEffect(() => {
     if (isOpen && session.type !== "anon" && session.pubkey && ndk) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- toggles loading for async fetch lifecycle
       setLoading(true);
       // Query: "How many kind 1 events has this user published with #satsrover tag?"
       ndk
@@ -164,7 +165,14 @@ export default function EarnDrawer({ isOpen, onClose }: EarnDrawerProps) {
   );
 }
 
-function MissionRow({ icon: Icon, title, desc, completed }: any) {
+interface MissionRowProps {
+  icon: React.ComponentType<{ className?: string }>;
+  title: string;
+  desc: string;
+  completed: boolean;
+}
+
+function MissionRow({ icon: Icon, title, desc, completed }: MissionRowProps) {
   return (
     <div
       className={cn(

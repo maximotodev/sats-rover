@@ -35,6 +35,7 @@ export default function Home() {
   // ✅ HARD GUARD: If user logs in while AuthDrawer is open, close it immediately
   useEffect(() => {
     if (session.type !== "anon" && view === "auth") {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- closes stale auth drawer after identity state updates
       setView("idle");
     }
   }, [session.type, view]);

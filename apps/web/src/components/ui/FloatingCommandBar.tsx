@@ -37,7 +37,7 @@ export default function FloatingCommandBar({
   balance,
   status,
   view,
-  currentHub,
+  currentHub: _currentHub,
   onSetView,
   onToggleSidebar,
 }: CommandBarProps) {
@@ -164,7 +164,14 @@ export default function FloatingCommandBar({
 }
 
 // ... MenuButton component ...
-function MenuButton({ icon: Icon, label, onClick, active }: any) {
+interface MenuButtonProps {
+  icon: React.ComponentType<{ className?: string }>;
+  label: string;
+  onClick: () => void;
+  active?: boolean;
+}
+
+function MenuButton({ icon: Icon, label, onClick, active }: MenuButtonProps) {
   return (
     <button
       onClick={onClick}
