@@ -11,7 +11,7 @@ import React, {
 } from "react";
 import { useCallback } from "react";
 import { NDKNWCWallet as NDKNwc } from "@nostr-dev-kit/wallet";
-import { useSession } from "@/contexts/NostrSessionContext";
+import { useIdentity } from "./identity-context";
 import { getNwcStorageKey, parseNwcUrl } from "@/lib/wallet/nwc";
 
 export type WalletState = "disconnected" | "connecting" | "connected" | "error";
@@ -47,7 +47,7 @@ interface WalletContextValue {
 const WalletContext = createContext<WalletContextValue | null>(null);
 
 export function WalletProvider({ children }: { children: React.ReactNode }) {
-  const { ndk } = useSession();
+  const { ndk } = useIdentity();
   const [state, setState] = useState<WalletState>("disconnected");
   const [balance, setBalance] = useState<number | null>(null);
   const [connectionInfo, setConnectionInfo] = useState<

@@ -9,7 +9,7 @@ import {
   ArrowRight,
   Upload,
 } from "lucide-react";
-import { useSession } from "@/contexts/NostrSessionContext";
+import { useIdentity } from "@/context/identity-context";
 
 interface AuthDrawerProps {
   isOpen: boolean;
@@ -19,8 +19,14 @@ interface AuthDrawerProps {
 type AuthStep = "menu" | "login" | "create_profile" | "backup";
 
 export default function AuthDrawer({ isOpen, onClose }: AuthDrawerProps) {
-  const { loginWithExtension, loginWithNsec, signup, updateProfile, session } =
-    useSession();
+  const identity = useIdentity();
+  const { session } = identity;
+  const {
+    loginWithNip07: loginWithExtension,
+    loginWithNsec,
+    signup,
+    updateProfile,
+  } = identity.actions;
 
   const [step, setStep] = useState<AuthStep>("menu");
   const [nsecInput, setNsecInput] = useState("");

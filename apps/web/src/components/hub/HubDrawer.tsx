@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { BITCOIN_HUBS } from "@/lib/constants";
 import { Plane, Search, X, Signal, Loader2, MapPin } from "lucide-react";
-import { useSession } from "@/contexts/NostrSessionContext";
+import { useIdentity } from "@/context/identity-context";
 import { calculateCityPulse } from "@/lib/scoring";
 import { generateCityId } from "@/lib/geoutils";
 
@@ -16,7 +16,7 @@ export default function HubDrawer({
   onClose,
   onSelect,
 }: HubDrawerProps) {
-  const { ndk } = useSession();
+  const { ndk } = useIdentity();
   const [query, setQuery] = useState("");
   const [hubStats, setHubStats] = useState<Record<string, number>>({});
   const [loadingStats, setLoadingStats] = useState(false);

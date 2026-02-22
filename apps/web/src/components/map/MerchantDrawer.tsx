@@ -17,7 +17,7 @@ import {
   CheckCircle2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { useSession } from "@/contexts/NostrSessionContext";
+import { useIdentity } from "@/context/identity-context";
 import { useTransmitSignalFlow } from "@/flows/transmit-signal-flow";
 import { useFlowGates } from "@/flows/gates";
 import { NDKUserProfile } from "@nostr-dev-kit/ndk";
@@ -56,7 +56,9 @@ export default function MerchantDrawer({
   merchant,
   onClose,
 }: MerchantDrawerProps) {
-  const { session, publishSignal, ndk } = useSession();
+  const identity = useIdentity();
+  const { session, ndk } = identity;
+  const { publishSignal } = identity.actions;
   const transmitSignalFlow = useTransmitSignalFlow();
   const gates = useFlowGates();
 

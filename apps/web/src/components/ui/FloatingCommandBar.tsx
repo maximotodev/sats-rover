@@ -11,7 +11,7 @@ import {
   Activity,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { useSession } from "@/contexts/NostrSessionContext";
+import { useIdentity } from "@/context/identity-context";
 
 export type CommandView =
   | "idle"
@@ -41,7 +41,7 @@ export default function FloatingCommandBar({
   onSetView,
   onToggleSidebar,
 }: CommandBarProps) {
-  const { session } = useSession();
+  const { session } = useIdentity();
 
   const handleCenterClick = () => {
     if (session.type === "anon") {

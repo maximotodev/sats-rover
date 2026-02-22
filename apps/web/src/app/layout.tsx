@@ -3,7 +3,6 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import "./globals.css";
 import type { Metadata } from "next";
 import { IdentityProvider } from "@/context/identity-context";
-import { NostrSessionProvider } from "@/contexts/NostrSessionContext";
 import { WalletProvider } from "@/context/wallet-context";
 
 export const metadata: Metadata = {
@@ -21,9 +20,7 @@ export default function RootLayout({
     <html lang="en">
       <body>
         <IdentityProvider>
-          <NostrSessionProvider>
-            <WalletProvider>{children}</WalletProvider>
-          </NostrSessionProvider>
+          <WalletProvider>{children}</WalletProvider>
         </IdentityProvider>
       </body>
     </html>

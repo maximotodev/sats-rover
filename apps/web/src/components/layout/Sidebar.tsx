@@ -10,7 +10,7 @@ import {
   Copy,
   Check,
 } from "lucide-react";
-import { useSession } from "@/contexts/NostrSessionContext";
+import { useIdentity } from "@/context/identity-context";
 import { cn } from "@/lib/utils";
 import { nip19 } from "nostr-tools";
 
@@ -21,7 +21,9 @@ interface SidebarProps {
 }
 
 export default function Sidebar({ isOpen, onClose, onNavigate }: SidebarProps) {
-  const { session, logout } = useSession();
+  const identity = useIdentity();
+  const { session } = identity;
+  const { logout } = identity.actions;
   const [copied, setCopied] = useState(false);
 
   // Derive npub safely

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { Trophy, Map, Zap, X, Loader2, Shield, Target } from "lucide-react";
-import { useSession } from "@/contexts/NostrSessionContext";
+import { useIdentity } from "@/context/identity-context";
 import { cn } from "@/lib/utils";
 import { Share2 } from "lucide-react";
 
@@ -10,7 +10,7 @@ interface EarnDrawerProps {
 }
 
 export default function EarnDrawer({ isOpen, onClose }: EarnDrawerProps) {
-  const { ndk, session } = useSession();
+  const { ndk, session } = useIdentity();
   const [checkInCount, setCheckInCount] = useState(0);
   const [loading, setLoading] = useState(false);
 

@@ -11,11 +11,11 @@ import Sidebar from "@/components/layout/Sidebar";
 import FloatingCommandBar, {
   CommandView,
 } from "@/components/ui/FloatingCommandBar";
-import { useSession } from "@/contexts/NostrSessionContext";
+import { useIdentity } from "@/context/identity-context";
 import { useWallet } from "@/context/wallet-context";
 
 export default function Home() {
-  const { session } = useSession();
+  const { session } = useIdentity();
   const { state, balance, connectNWC, disconnect, payInvoice } = useWallet();
 
   const [view, setView] = useState<CommandView>("idle");

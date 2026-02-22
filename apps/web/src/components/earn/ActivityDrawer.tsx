@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { Activity, Radio, X, Loader2, Zap, MapPin } from "lucide-react";
-import { useSession } from "@/contexts/NostrSessionContext";
+import { useIdentity } from "@/context/identity-context";
 import { NDKUserProfile } from "@nostr-dev-kit/ndk";
 
 interface ActivityDrawerProps {
@@ -31,7 +31,7 @@ export default function ActivityDrawer({
   isOpen,
   onClose,
 }: ActivityDrawerProps) {
-  const { ndk } = useSession();
+  const { ndk } = useIdentity();
   const [signals, setSignals] = useState<SignalEvent[]>([]);
   const [loading, setLoading] = useState(false);
 
