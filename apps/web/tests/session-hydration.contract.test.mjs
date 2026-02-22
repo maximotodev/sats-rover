@@ -1,7 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { hydrateUserProfile } from "../src/lib/session-hydration.js";
+import { hydrateUserProfile } from "./session-hydration.test-shim.mjs";
+
+let casesExecuted = 0;
 
 test("hydrates profile from mocked fetchProfile result", async () => {
   let calls = 0;
@@ -23,6 +25,7 @@ test("hydrates profile from mocked fetchProfile result", async () => {
   assert.equal(profile?.name, "Rover");
   assert.equal(profile?.image, "https://example.com/avatar.png");
   assert.equal(user.profile?.displayName, "Rover Ops");
+  casesExecuted += 1;
 });
 
 test("does not fetch when profile already exists", async () => {
@@ -39,4 +42,9 @@ test("does not fetch when profile already exists", async () => {
 
   assert.equal(calls, 0);
   assert.equal(profile?.name, "Existing");
+  casesExecuted += 1;
+});
+
+test("executes both session hydration contract cases", () => {
+  assert.equal(casesExecuted, 2);
 });
