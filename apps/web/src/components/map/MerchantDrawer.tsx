@@ -320,10 +320,10 @@ export default function MerchantDrawer({
       setReviews((prev) => [optimisticNote, ...prev]);
 
       // Add current user profile to map if missing
-      if (session.user?.profile && session.pubkey) {
+      if (session.profile && session.pubkey) {
         setProfiles((prev) => ({
           ...prev,
-          [session.pubkey!]: session.user!.profile!,
+          [session.pubkey!]: session.profile!,
         }));
       }
 

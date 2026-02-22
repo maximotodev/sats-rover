@@ -1,13 +1,15 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import NDK, {
   NDKEvent,
   NDKNip07Signer,
   NDKPrivateKeySigner,
   NDKUser,
+  NDKUserProfile,
 } from "@nostr-dev-kit/ndk";
 import { nip19, generateSecretKey } from "nostr-tools";
 import { getNDK } from "@/lib/ndk"; // ✅ Singleton Import
 import { storeNsec, loadNsec, clearNsec } from "@/lib/storage";
+import { hydrateUserProfile } from "@/lib/session-hydration";
 
 /**
  * PROTOCOL v1 CONSTANTS
@@ -30,11 +32,21 @@ export interface NostrSession {
   type: SessionType;
   pubkey?: string;
   user?: NDKUser;
+  profile?: NDKUserProfile;
 }
 
 export function useNostr() {
   const [ndk] = useState<NDK>(() => getNDK());
   const [session, setSession] = useState<NostrSession>({ type: "anon" });
+  const profileHydrationAttempted = useRef<Set<string>>(new Set());
+
+  const buildSessionFromUser = useCallback(
+    async (type: SessionType, user: NDKUser): Promise<NostrSession> => {
+      const profile = (await hydrateUserProfile(user)) as NDKUserProfile | undefined;
+      return { type, pubkey: user.pubkey, user, profile };
+    },
+    [],
+  );
 
   // 1. Auth: Extension (NIP-07)
   const loginWithExtension = useCallback(async () => {
@@ -42,10 +54,9 @@ export function useNostr() {
     const signer = new NDKNip07Signer();
     ndk.signer = signer;
     const user = await signer.user();
-    // Senior Note: We skip fetchProfile here.
-    // UI components should fetch profiles only when needed to minimize relay load.
-    setSession({ type: "nip07", pubkey: user.pubkey, user });
-  }, [ndk]);
+    profileHydrationAttempted.current.delete(user.pubkey);
+    setSession(await buildSessionFromUser("nip07", user));
+  }, [ndk, buildSessionFromUser]);
 
   // 2. Auth: Private Key (nsec)
   const loginWithNsec = useCallback(
@@ -58,17 +69,18 @@ export function useNostr() {
         const signer = new NDKPrivateKeySigner(hexKey);
         ndk.signer = signer;
         const user = await signer.user();
+        profileHydrationAttempted.current.delete(user.pubkey);
 
         if (remember) storeNsec(nsec);
         else clearNsec();
 
-        setSession({ type: "local_nsec", pubkey: user.pubkey, user });
+        setSession(await buildSessionFromUser("local_nsec", user));
       } catch (e) {
         console.error("Login failed", e);
         throw e;
       }
     },
-    [ndk],
+    [ndk, buildSessionFromUser],
   );
 
   // 3. Auth: Signup (Ephemeral or Stored)
@@ -81,13 +93,14 @@ export function useNostr() {
       const signer = new NDKPrivateKeySigner(hexKey);
       ndk.signer = signer;
       const user = await signer.user();
+      profileHydrationAttempted.current.delete(user.pubkey);
 
       if (remember) storeNsec(nsec);
-      setSession({ type: "local_nsec", pubkey: user.pubkey, user });
+      setSession(await buildSessionFromUser("local_nsec", user));
 
       return { nsec, user };
     },
-    [ndk],
+    [ndk, buildSessionFromUser],
   );
 
   // 4. Auto-Restore Session
@@ -101,8 +114,37 @@ export function useNostr() {
   const logout = useCallback(() => {
     ndk.signer = undefined;
     clearNsec();
+    profileHydrationAttempted.current.clear();
     setSession({ type: "anon" });
   }, [ndk]);
+
+  useEffect(() => {
+    if (session.type === "anon" || !session.pubkey || !session.user || session.profile) {
+      return;
+    }
+    if (profileHydrationAttempted.current.has(session.pubkey)) {
+      return;
+    }
+    profileHydrationAttempted.current.add(session.pubkey);
+
+    let cancelled = false;
+    const currentPubkey = session.pubkey;
+    void hydrateUserProfile(session.user)
+      .then((profile) => {
+        if (cancelled || !profile) return;
+        setSession((prev) => {
+          if (prev.pubkey !== currentPubkey || prev.type === "anon") return prev;
+          return { ...prev, profile, user: prev.user };
+        });
+      })
+      .catch(() => {
+        // Keep fallback rendering if relays are unavailable.
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [session.type, session.pubkey, session.user, session.profile]);
 
   /**
    * PROTOCOL v1: SIGNAL PUBLISHING (Kind 30331)
@@ -148,6 +190,12 @@ export function useNostr() {
       event.kind = 0;
       event.content = JSON.stringify({ name, about, picture });
       await event.publish();
+      setSession((prev) => {
+        if (prev.type === "anon") return prev;
+        const profile = { ...(prev.profile || {}), name, about, picture };
+        if (prev.user) prev.user.profile = profile;
+        return { ...prev, profile, user: prev.user };
+      });
     },
     [ndk, session],
   );

@@ -112,10 +112,10 @@ export default function FloatingCommandBar({
         >
           {session.type !== "anon" ? (
             // ✅ LOGGED IN: Avatar Only
-            session.user?.profile?.image ? (
+            session.profile?.image ? (
               // eslint-disable-next-line @next/next/no-img-element
               <img
-                src={session.user.profile.image}
+                src={session.profile.image}
                 className="w-8 h-8 rounded-full border border-[#00FF41]/50 shadow-[0_0_10px_rgba(0,255,65,0.2)] object-cover bg-gray-800"
                 alt="Me"
               />
