@@ -1,9 +1,15 @@
+// apps/indexer/src/importer.ts
 import { Pool } from "pg";
 import { verifyEvent, type Event } from "nostr-tools";
 
-const CANONICAL_PLACE_ID = /^(osm:(node|way|relation):\d+|btcmap:[a-zA-Z0-9:_-]+|manual:[a-zA-Z0-9_-]+|sr:[a-zA-Z0-9:_-]+)$/;
+const CANONICAL_PLACE_ID =
+  /^(osm:(node|way|relation):\d+|btcmap:[a-zA-Z0-9:_-]+|manual:[a-zA-Z0-9_-]+|sr:[a-zA-Z0-9:_-]+)$/;
 
-function log(level: "info" | "warn" | "error", msg: string, ctx: Record<string, unknown> = {}) {
+function log(
+  level: "info" | "warn" | "error",
+  msg: string,
+  ctx: Record<string, unknown> = {},
+) {
   const payload = {
     ts: new Date().toISOString(),
     level,
@@ -25,7 +31,10 @@ export async function processSatsRoverEvent(pool: Pool, event: Event) {
   try {
     if (!verifyEvent(event)) return null;
     if (!isValidHex64(event.id) || !isValidHex64(event.pubkey)) {
-      log("warn", "invalid_event_identity", { eventId: event.id, pubkey: event.pubkey });
+      log("warn", "invalid_event_identity", {
+        eventId: event.id,
+        pubkey: event.pubkey,
+      });
       return null;
     }
 
@@ -79,10 +88,16 @@ export async function processSatsRoverEvent(pool: Pool, event: Event) {
     return null;
   } catch (err: any) {
     if (err.code === "23503") {
-      log("warn", "signal_foreign_key_rejected", { eventId: event?.id, placeId: event?.tags?.find?.((t: string[]) => t[0] === "place")?.[1] });
+      log("warn", "signal_foreign_key_rejected", {
+        eventId: event?.id,
+        placeId: event?.tags?.find?.((t: string[]) => t[0] === "place")?.[1],
+      });
       return null;
     }
-    log("error", "importer_error", { error: err.message || String(err), eventId: event?.id });
+    log("error", "importer_error", {
+      error: err.message || String(err),
+      eventId: event?.id,
+    });
     return null;
   }
 }

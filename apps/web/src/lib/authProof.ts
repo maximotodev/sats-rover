@@ -1,3 +1,4 @@
+// apps/web/src/lib/authProof.ts
 import { finalizeEvent, nip19 } from "nostr-tools";
 
 export type AuthEvent = {
@@ -16,12 +17,15 @@ type BuildAuthEventInput = {
   path: "/v1/checkins/intent" | "/v1/checkins/confirm";
   nonce: string;
   bodyBytes: Uint8Array;
+  signerPreference?: "auto" | "session_nip07" | "session_local_nsec";
 };
 
 type NostrSigner = {
   signEvent: (
     event: Omit<AuthEvent, "id" | "sig">,
-  ) => Promise<Partial<AuthEvent> & { id?: unknown; sig?: unknown; pubkey?: unknown }>;
+  ) => Promise<
+    Partial<AuthEvent> & { id?: unknown; sig?: unknown; pubkey?: unknown }
+  >;
 };
 
 function isHex(value: unknown, len: number): value is string {
@@ -43,9 +47,15 @@ function normalizePubkey(pubkey: string): string {
 export async function sha256Hex(
   bytes: Uint8Array | ArrayBuffer,
 ): Promise<string> {
-  const input = bytes instanceof Uint8Array ? new Uint8Array(bytes) : new Uint8Array(bytes);
-  const digest = await crypto.subtle.digest("SHA-256", input as unknown as BufferSource);
-  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+  const input =
+    bytes instanceof Uint8Array ? new Uint8Array(bytes) : new Uint8Array(bytes);
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    input as unknown as BufferSource,
+  );
+  return Array.from(new Uint8Array(digest), (b) =>
+    b.toString(16).padStart(2, "0"),
+  ).join("");
 }
 
 export function randomNonce(): string {
@@ -62,7 +72,10 @@ export function b64urlJson(obj: unknown): string {
   const json = JSON.stringify(obj);
   const bytes = new TextEncoder().encode(json);
   const binary = Array.from(bytes, (b) => String.fromCharCode(b)).join("");
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+  return btoa(binary)
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
 }
 
 async function nostrEventIdHex(event: {
@@ -87,7 +100,9 @@ async function nostrEventIdHex(event: {
 async function signWithNip07(
   template: Omit<AuthEvent, "id" | "sig">,
 ): Promise<AuthEvent | null> {
-  const nostr = (globalThis.window as Window & { nostr?: NostrSigner } | undefined)?.nostr;
+  const nostr = (
+    globalThis.window as (Window & { nostr?: NostrSigner }) | undefined
+  )?.nostr;
   if (!nostr || typeof nostr.signEvent !== "function") return null;
   const signed = await nostr.signEvent(template);
   if (
@@ -124,7 +139,11 @@ async function signWithLocalNsec(
   const secretKey = decodeLocalNsec();
   if (!secretKey) return null;
   const signed = finalizeEvent(template, secretKey);
-  if (!isHex(signed.id, 64) || !isHex(signed.sig, 128) || !isHex(signed.pubkey, 64)) {
+  if (
+    !isHex(signed.id, 64) ||
+    !isHex(signed.sig, 128) ||
+    !isHex(signed.pubkey, 64)
+  ) {
     throw new Error("invalid_local_signature");
   }
   return {
@@ -159,7 +178,21 @@ export async function buildAuthEvent(
   };
 
   const expectedId = await nostrEventIdHex(template);
-  const signed = (await signWithNip07(template)) ?? (await signWithLocalNsec(template));
+
+  const preference = input.signerPreference ?? "auto";
+  let signed: AuthEvent | null = null;
+
+  if (preference === "session_local_nsec") {
+    signed = await signWithLocalNsec(template);
+    if (!signed) {
+      throw new Error("missing_local_nsec");
+    }
+  } else if (preference === "session_nip07") {
+    signed = await signWithNip07(template);
+  } else {
+    signed = (await signWithNip07(template)) ?? (await signWithLocalNsec(template));
+  }
+
   if (!signed) {
     throw new Error("missing_signer");
   }

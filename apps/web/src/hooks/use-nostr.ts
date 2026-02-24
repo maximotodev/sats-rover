@@ -62,6 +62,7 @@ export function useNostr() {
   const loginWithNsec = useCallback(
     async (nsec: string, remember: boolean = false) => {
       try {
+        void remember;
         const { type, data } = nip19.decode(nsec);
         if (type !== "nsec") throw new Error("Invalid nsec");
 
@@ -71,8 +72,9 @@ export function useNostr() {
         const user = await signer.user();
         profileHydrationAttempted.current.delete(user.pubkey);
 
-        if (remember) storeNsec(nsec);
-        else clearNsec();
+        // Keep nsec in sessionStorage for the active browser session so
+        // request-bound auth proofs can be signed without extension prompts.
+        storeNsec(nsec);
 
         setSession(await buildSessionFromUser("local_nsec", user));
       } catch (e) {
@@ -86,6 +88,7 @@ export function useNostr() {
   // 3. Auth: Signup (Ephemeral or Stored)
   const signup = useCallback(
     async (remember: boolean = false) => {
+      void remember;
       const sk = generateSecretKey();
       const hexKey = u8ToHex(sk);
       const nsec = nip19.nsecEncode(sk);
@@ -95,7 +98,9 @@ export function useNostr() {
       const user = await signer.user();
       profileHydrationAttempted.current.delete(user.pubkey);
 
-      if (remember) storeNsec(nsec);
+      // Keep nsec in sessionStorage for the active browser session so
+      // request-bound auth proofs can be signed without extension prompts.
+      storeNsec(nsec);
       setSession(await buildSessionFromUser("local_nsec", user));
 
       return { nsec, user };
