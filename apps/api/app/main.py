@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 from app.api.v1.places import router as places_router
+from app.api.v1.checkins import router as checkins_router
 from app.api.v1.signals import router as signals_router
 from app.core.settings import settings
 from app.db.engine import engine
@@ -19,6 +20,7 @@ app.add_middleware(
 )
 
 app.include_router(places_router)
+app.include_router(checkins_router)
 app.include_router(signals_router)
 
 @app.get("/debug/counts")
