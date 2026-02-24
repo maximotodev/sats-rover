@@ -2,7 +2,8 @@
 import "maplibre-gl/dist/maplibre-gl.css";
 import "./globals.css";
 import type { Metadata } from "next";
-import { NostrSessionProvider } from "@/contexts/NostrSessionContext"; // ✅ Import
+import { IdentityProvider } from "@/context/identity-context";
+import { WalletProvider } from "@/context/wallet-context";
 
 export const metadata: Metadata = {
   title: "SatsRover",
@@ -18,8 +19,9 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body>
-        {/* ✅ Wrap Children */}
-        <NostrSessionProvider>{children}</NostrSessionProvider>
+        <IdentityProvider>
+          <WalletProvider>{children}</WalletProvider>
+        </IdentityProvider>
       </body>
     </html>
   );

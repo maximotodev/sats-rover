@@ -62,6 +62,21 @@ const TAG_ALLOWLIST_PREFIXES = [
   "boost:",
 ];
 
+type SmallValue = string | number | boolean | null;
+type TagRecord = Record<string, unknown>;
+type Source = "sr" | "btcmap" | "osm";
+type AppErrorKind =
+  | "CONFIG_ERROR"
+  | "BAD_REQUEST"
+  | "ENGINE_BAD_RESPONSE"
+  | "ENGINE_TIMEOUT"
+  | "ENGINE_UNAVAILABLE";
+
+interface AppError extends Error {
+  kind?: AppErrorKind;
+  attempts?: number;
+}
+
 function isAllowedTagKey(k: string): boolean {
   if (TAG_ALLOWLIST_EXACT.has(k)) return true;
   return TAG_ALLOWLIST_PREFIXES.some((p) => k.startsWith(p));
@@ -72,7 +87,7 @@ function clampString(s: string, maxLen: number): string {
   return t.length > maxLen ? t.slice(0, maxLen) : t;
 }
 
-function coerceSmallValue(v: any): string | number | boolean | null {
+function coerceSmallValue(v: unknown): SmallValue {
   if (v == null) return null;
   if (typeof v === "string") return clampString(v, MAX_VALUE_LEN);
   if (typeof v === "number") return Number.isFinite(v) ? v : null;
@@ -86,12 +101,10 @@ function coerceSmallValue(v: any): string | number | boolean | null {
   }
 }
 
-function sanitizeTags(
-  tags: Record<string, any> | null | undefined,
-): Record<string, any> {
+function sanitizeTags(tags: TagRecord | null | undefined): Record<string, SmallValue> {
   if (!tags || typeof tags !== "object") return {};
 
-  const out: Record<string, any> = {};
+  const out: Record<string, SmallValue> = {};
   let keys = 0;
   let totalBytes = 0;
 
@@ -121,7 +134,7 @@ function sanitizeTags(
  * IMPORTANT: Category should be computed from RAW tags, not sanitized tags.
  * Otherwise your allowlist might accidentally remove fields needed for category.
  */
-function pickCategoryRaw(tags: Record<string, any> | null | undefined): string {
+function pickCategoryRaw(tags: TagRecord | null | undefined): string {
   if (!tags) return "merchant";
 
   // BTCMap often uses category=other/restaurant/etc
@@ -138,7 +151,7 @@ function pickCategoryRaw(tags: Record<string, any> | null | undefined): string {
   return "merchant";
 }
 
-function toFiniteNumber(v: any): number | null {
+function toFiniteNumber(v: unknown): number | null {
   const n = typeof v === "number" ? v : Number(v);
   return Number.isFinite(n) ? n : null;
 }
@@ -150,10 +163,9 @@ type ParsedBbox = {
   maxLat: number;
 };
 
-
 function configError(msg: string): Error {
-  const err = new Error(msg);
-  (err as any).kind = "CONFIG_ERROR";
+  const err: AppError = new Error(msg);
+  err.kind = "CONFIG_ERROR";
   return err;
 }
 
@@ -170,8 +182,8 @@ function resolveEngineUrl(): string {
 }
 
 function badRequest(msg: string): Error {
-  const err = new Error(msg);
-  (err as any).kind = "BAD_REQUEST";
+  const err: AppError = new Error(msg);
+  err.kind = "BAD_REQUEST";
   return err;
 }
 
@@ -243,19 +255,21 @@ async function fetchEngineWithRetry(url: string) {
         continue;
       }
 
-      const err = new Error(`Engine responded ${resp.status}`);
-      (err as any).kind = "ENGINE_BAD_RESPONSE";
-      (err as any).attempts = attempt + 1;
+      const err: AppError = new Error(`Engine responded ${resp.status}`);
+      err.kind = "ENGINE_BAD_RESPONSE";
+      err.attempts = attempt + 1;
       throw err;
-    } catch (e: any) {
+    } catch (e: unknown) {
       clearTimeout(timer);
 
-      const timedOut = e?.name === "AbortError";
+      const timedOut = e instanceof Error && e.name === "AbortError";
       const kind = timedOut ? "ENGINE_TIMEOUT" : "ENGINE_UNAVAILABLE";
 
-      const err = new Error(e?.message || "fetch failed");
-      (err as any).kind = kind;
-      (err as any).attempts = attempt + 1;
+      const err: AppError = new Error(
+        e instanceof Error ? e.message : "fetch failed",
+      );
+      err.kind = kind;
+      err.attempts = attempt + 1;
       lastError = err;
 
       if (attempt >= maxAttempts - 1) break;
@@ -265,6 +279,17 @@ async function fetchEngineWithRetry(url: string) {
   }
 
   throw lastError || new Error("fetch failed");
+}
+
+function asAppError(e: unknown): AppError {
+  if (e instanceof Error) return e as AppError;
+  return new Error("Unknown error");
+}
+
+function toSource(value: unknown): Source {
+  return value === "sr" || value === "osm" || value === "btcmap"
+    ? value
+    : "btcmap";
 }
 
 export async function GET(request: Request) {
@@ -295,7 +320,7 @@ export async function GET(request: Request) {
       lon: number;
       source: string;
       glow_score: number;
-      tags: Record<string, any>;
+      tags: TagRecord;
     }> = await resp.json();
 
     const merchants = places
@@ -321,7 +346,7 @@ export async function GET(request: Request) {
           lon,
           category,
           tags: safeTags,
-          source: (p.source as "sr" | "btcmap" | "osm") ?? "btcmap",
+          source: toSource(p.source),
           signalStrength:
             typeof p.glow_score === "number" && Number.isFinite(p.glow_score)
               ? p.glow_score
@@ -343,10 +368,11 @@ export async function GET(request: Request) {
     );
 
     return NextResponse.json({ data: merchants }, { status: 200 });
-  } catch (e: any) {
-    const kind = e?.kind || "UNKNOWN";
-    const message = e?.message || "Unknown error";
-    attempts = Number.isFinite(e?.attempts) ? e.attempts : attempts;
+  } catch (e: unknown) {
+    const err = asAppError(e);
+    const kind = err.kind || "UNKNOWN";
+    const message = err.message || "Unknown error";
+    attempts = Number.isFinite(err.attempts) ? (err.attempts as number) : attempts;
 
     let status = 502;
     let error = "ENGINE_UNAVAILABLE";
@@ -391,7 +417,7 @@ export async function GET(request: Request) {
         durationMs: Date.now() - startedAt,
         attempts,
         ok: false,
-        errorName: e?.name || "Error",
+        errorName: err.name || "Error",
         errorMessage: message,
       }),
     );

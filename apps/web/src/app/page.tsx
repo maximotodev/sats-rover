@@ -11,16 +11,12 @@ import Sidebar from "@/components/layout/Sidebar";
 import FloatingCommandBar, {
   CommandView,
 } from "@/components/ui/FloatingCommandBar";
-import { useSession } from "@/contexts/NostrSessionContext"; // ✅ CORRECT IMPORT
-import { useLightningEngine } from "@/hooks/use-lightning-engine";
+import { useIdentity } from "@/context/identity-context";
+import { useWallet } from "@/context/wallet-context";
 
 export default function Home() {
-  // ✅ USE SESSION CONTEXT (Single Source of Truth)
-  const { ndk, session } = useSession();
-
-  // Pass the NDK instance from context to the wallet engine
-  const { status, balance, ignite, disconnect, payInvoice } =
-    useLightningEngine(ndk);
+  const { session } = useIdentity();
+  const { state, balance, connectNWC, disconnect, payInvoice } = useWallet();
 
   const [view, setView] = useState<CommandView>("idle");
   const [currentHub, setCurrentHub] = useState("Global");
@@ -28,6 +24,7 @@ export default function Home() {
     lat: number;
     lon: number;
   } | null>(null);
+  const [currentBbox, setCurrentBbox] = useState<string | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
   const handleHubSelect = (lat: number, lon: number, name: string) => {
@@ -39,6 +36,7 @@ export default function Home() {
   // ✅ HARD GUARD: If user logs in while AuthDrawer is open, close it immediately
   useEffect(() => {
     if (session.type !== "anon" && view === "auth") {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- closes stale auth drawer after identity state updates
       setView("idle");
     }
   }, [session.type, view]);
@@ -49,6 +47,7 @@ export default function Home() {
       <div className="absolute inset-0 z-0 h-dvh w-full">
         <MapView
           flyToCoords={flyToCoords}
+          onBboxChange={setCurrentBbox}
           onInteract={() => {
             setView("idle");
             setIsSidebarOpen(false);
@@ -59,7 +58,7 @@ export default function Home() {
       {/* 2. HUD LAYER */}
       <FloatingCommandBar
         balance={balance}
-        status={status}
+        status={state === "disconnected" ? "idle" : state}
         view={view}
         currentHub={currentHub}
         onSetView={setView}
@@ -81,9 +80,9 @@ export default function Home() {
       <WalletDrawer
         isOpen={view === "wallet"}
         onClose={() => setView("idle")}
-        status={status}
+        status={state === "disconnected" ? "idle" : state}
         balance={balance}
-        onConnect={ignite}
+        onConnect={connectNWC}
         onDisconnect={disconnect}
         onPay={payInvoice}
       />
@@ -98,6 +97,7 @@ export default function Home() {
 
       <ActivityDrawer
         isOpen={view === "activity"}
+        bbox={currentBbox}
         onClose={() => setView("idle")}
       />
 

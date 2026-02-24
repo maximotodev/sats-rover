@@ -39,3 +39,10 @@ class CheckinConfirmIn(BaseModel):
 class CheckinConfirmOut(BaseModel):
     status: str
     reason_code: str | None = None
+    event_id: str | None = Field(default=None, pattern=HEX64)
+
+
+class CheckinStatusOut(BaseModel):
+    status: str
+    reason_code: str | None = None
+    event_id: str | None = Field(default=None, pattern=HEX64)

@@ -91,27 +91,3 @@ export function calculateCityPulse(events: NDKEvent[]): ScoreResult {
     lightningRatio,
   };
 }
-
-/**
- * Calculates Signal Strength (0-1) for a single merchant based on history.
- * Prioritizes Lightning Success.
- */
-export function calculateMerchantIntensity(events: NDKEvent[]): number {
-  if (events.length === 0) return 0;
-
-  const lightningSuccesses = events.filter(
-    (e) =>
-      e.tags.some((t) => t[0] === "status" && t[1] === "success") &&
-      e.tags.some((t) => t[0] === "method" && t[1] === "lightning")
-  ).length;
-
-  const anySuccess = events.filter((e) =>
-    e.tags.some((t) => t[0] === "status" && t[1] === "success")
-  ).length;
-
-  // Tiered Intensity
-  if (lightningSuccesses >= 3) return 1.0; // High Certainty
-  if (lightningSuccesses >= 1) return 0.7; // Validated
-  if (anySuccess >= 1) return 0.4; // Non-LN Success
-  return 0.2; // Unverified Activity
-}

@@ -10,7 +10,7 @@ import {
   Copy,
   Check,
 } from "lucide-react";
-import { useSession } from "@/contexts/NostrSessionContext";
+import { useIdentity } from "@/context/identity-context";
 import { cn } from "@/lib/utils";
 import { nip19 } from "nostr-tools";
 
@@ -21,7 +21,9 @@ interface SidebarProps {
 }
 
 export default function Sidebar({ isOpen, onClose, onNavigate }: SidebarProps) {
-  const { session, logout } = useSession();
+  const identity = useIdentity();
+  const { session } = identity;
+  const { logout } = identity.actions;
   const [copied, setCopied] = useState(false);
 
   // Derive npub safely
@@ -67,10 +69,10 @@ export default function Sidebar({ isOpen, onClose, onNavigate }: SidebarProps) {
           </div>
 
           <div className="flex items-center gap-3">
-            {session.user?.profile?.image ? (
+            {session.profile?.image ? (
               // eslint-disable-next-line @next/next/no-img-element
               <img
-                src={session.user.profile.image}
+                src={session.profile.image}
                 className="w-12 h-12 rounded-full border border-white/10 object-cover bg-gray-800"
                 alt="Profile"
               />
@@ -82,7 +84,7 @@ export default function Sidebar({ isOpen, onClose, onNavigate }: SidebarProps) {
 
             <div className="flex-1 overflow-hidden">
               <p className="text-base font-bold text-white truncate">
-                {session.user?.profile?.name || "Sovereign User"}
+                {session.profile?.name || session.profile?.displayName || "Sovereign User"}
               </p>
 
               {/* Npub Copy */}
@@ -160,7 +162,13 @@ export default function Sidebar({ isOpen, onClose, onNavigate }: SidebarProps) {
   );
 }
 
-function MenuItem({ icon: Icon, label, onClick }: any) {
+interface MenuItemProps {
+  icon: React.ComponentType<{ className?: string }>;
+  label: string;
+  onClick: () => void;
+}
+
+function MenuItem({ icon: Icon, label, onClick }: MenuItemProps) {
   return (
     <button
       onClick={onClick}

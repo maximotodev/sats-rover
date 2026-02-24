@@ -44,7 +44,7 @@ export default function ManifestoDrawer({
           </p>
 
           <p>
-            SatsRover does not "certify" merchants. We record{" "}
+            SatsRover does not &quot;certify&quot; merchants. We record{" "}
             <span className="text-[#00FF41]">signals</span>.
           </p>
 

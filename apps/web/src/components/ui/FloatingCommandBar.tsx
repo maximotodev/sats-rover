@@ -11,7 +11,7 @@ import {
   Activity,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { useSession } from "@/contexts/NostrSessionContext";
+import { useIdentity } from "@/context/identity-context";
 
 export type CommandView =
   | "idle"
@@ -37,11 +37,11 @@ export default function FloatingCommandBar({
   balance,
   status,
   view,
-  currentHub,
+  currentHub: _currentHub,
   onSetView,
   onToggleSidebar,
 }: CommandBarProps) {
-  const { session } = useSession();
+  const { session } = useIdentity();
 
   const handleCenterClick = () => {
     if (session.type === "anon") {
@@ -112,10 +112,10 @@ export default function FloatingCommandBar({
         >
           {session.type !== "anon" ? (
             // ✅ LOGGED IN: Avatar Only
-            session.user?.profile?.image ? (
+            session.profile?.image ? (
               // eslint-disable-next-line @next/next/no-img-element
               <img
-                src={session.user.profile.image}
+                src={session.profile.image}
                 className="w-8 h-8 rounded-full border border-[#00FF41]/50 shadow-[0_0_10px_rgba(0,255,65,0.2)] object-cover bg-gray-800"
                 alt="Me"
               />
@@ -164,7 +164,14 @@ export default function FloatingCommandBar({
 }
 
 // ... MenuButton component ...
-function MenuButton({ icon: Icon, label, onClick, active }: any) {
+interface MenuButtonProps {
+  icon: React.ComponentType<{ className?: string }>;
+  label: string;
+  onClick: () => void;
+  active?: boolean;
+}
+
+function MenuButton({ icon: Icon, label, onClick, active }: MenuButtonProps) {
   return (
     <button
       onClick={onClick}

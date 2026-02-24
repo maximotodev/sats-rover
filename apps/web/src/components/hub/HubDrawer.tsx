@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { BITCOIN_HUBS } from "@/lib/constants";
-import { Plane, Search, X, Signal, Loader2, MapPin } from "lucide-react";
-import { useSession } from "@/contexts/NostrSessionContext";
+import { Plane, Search, X, Signal, Loader2 } from "lucide-react";
+import { useIdentity } from "@/context/identity-context";
 import { calculateCityPulse } from "@/lib/scoring";
 import { generateCityId } from "@/lib/geoutils";
 
@@ -16,13 +16,14 @@ export default function HubDrawer({
   onClose,
   onSelect,
 }: HubDrawerProps) {
-  const { ndk } = useSession();
+  const { ndk } = useIdentity();
   const [query, setQuery] = useState("");
   const [hubStats, setHubStats] = useState<Record<string, number>>({});
   const [loadingStats, setLoadingStats] = useState(false);
 
   useEffect(() => {
     if (isOpen && ndk) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- toggles loading for async fetch lifecycle
       setLoadingStats(true);
 
       Promise.all(
@@ -45,7 +46,7 @@ export default function HubDrawer({
 
             const stats = calculateCityPulse(Array.from(events));
             return { name: hub.name, score: stats.totalScore };
-          } catch (e) {
+          } catch {
             return { name: hub.name, score: 0 };
           }
         })
@@ -73,7 +74,7 @@ export default function HubDrawer({
         onSelect(parseFloat(data[0].lat), parseFloat(data[0].lon), query);
         onClose();
       }
-    } catch (e) {
+    } catch {
       alert("Search failed");
     }
   };

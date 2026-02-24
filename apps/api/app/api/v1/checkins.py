@@ -1,3 +1,4 @@
+# apps/api/app/api/v1/checkins.py
 from __future__ import annotations
 
 import base64

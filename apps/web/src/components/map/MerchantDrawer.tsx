@@ -1,27 +1,40 @@
-import React, { useState, useEffect, useRef } from "react";
+// apps/web/src/components/map/MerchantDrawer.tsx
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Merchant } from "@/lib/types";
 import {
-  X,
-  MapPin,
-  Zap,
-  Bitcoin,
-  Navigation,
-  KeyRound,
-  Eye,
-  EyeOff,
-  ThumbsUp,
-  ThumbsDown,
-  Meh,
-  Activity,
-  Signal,
-  Loader2,
   AlertCircle,
+  Bitcoin,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
+  Copy,
+  KeyRound,
+  Loader2,
+  MapPin,
+  Meh,
+  Navigation,
+  Share2,
+  Signal,
+  Sparkles,
+  ThumbsDown,
+  ThumbsUp,
+  X,
+  Zap,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { useSession } from "@/contexts/NostrSessionContext";
+import { useIdentity } from "@/context/identity-context";
+import { useTransmitSignalFlow } from "@/flows/transmit-signal-flow";
+import { useFlowGates } from "@/flows/gates";
 import { NDKUserProfile } from "@nostr-dev-kit/ndk";
 import { buildAuthHeaders, randomNonce } from "@/lib/authProof";
+import IdentityGateModal from "@/components/modals/IdentityGateModal";
+import WalletGateModal from "@/components/modals/WalletGateModal";
+import {
+  createOptimisticSignalFeedItem,
+  useSignalFeed,
+} from "@/domain/signals/client";
+import type { SignalFeedItemUI, SignalStatus } from "@/domain/signals/types";
+import { successCount as countSuccessfulSignals } from "@/domain/signals/selectors";
 
 interface MerchantDrawerProps {
   merchant: Merchant | null;
@@ -30,17 +43,12 @@ interface MerchantDrawerProps {
 
 type ProfileMap = Record<string, NDKUserProfile>;
 
-interface FeedItem {
-  event_id: string;
-  pubkey: string;
-  status: "success" | "failed" | "did_not_try";
-  content: string;
-  created_at: string;
-}
-
 type CheckinStatusState = "idle" | "pending" | "ok" | "failed" | "not_found";
+type ComposerStep = "broadcast" | "pay";
 
-function tagTruthy(v: any): boolean {
+type FailedBroadcastMap = Record<string, string>;
+
+function tagTruthy(v: unknown): boolean {
   if (v === true) return true;
   if (typeof v === "number") return v === 1;
   if (typeof v === "string") {
@@ -50,43 +58,218 @@ function tagTruthy(v: any): boolean {
   return false;
 }
 
+function formatRelative(ms: number): string {
+  const diff = Math.max(0, Date.now() - ms);
+  const sec = Math.floor(diff / 1000);
+  if (sec < 60) return `${sec}s ago`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hour = Math.floor(min / 60);
+  if (hour < 24) return `${hour}h ago`;
+  return `${Math.floor(hour / 24)}d ago`;
+}
+
+function shortHex(value: string, left = 8, right = 6): string {
+  if (!value || value.length <= left + right + 1) return value;
+  return `${value.slice(0, left)}…${value.slice(-right)}`;
+}
+
+async function copyText(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// AI placeholder: intentionally local-only. Future hook may call /api/ai/place-summary.
+function getFutureAiSummaryHint(placeId: string): string {
+  return `AI summary for ${placeId} is not available yet.`;
+}
+
+function FeedStatusBadge({ status }: { status: SignalStatus }) {
+  if (status === "success") {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full border border-[#00FF41]/40 bg-[#00FF41]/10 px-2 py-0.5 text-[10px] text-[#00FF41]">
+        <CheckCircle2 className="h-3 w-3" /> Worked
+      </span>
+    );
+  }
+  if (status === "failed") {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full border border-red-500/40 bg-red-500/10 px-2 py-0.5 text-[10px] text-red-300">
+        <AlertCircle className="h-3 w-3" /> Failed
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-1 rounded-full border border-white/20 bg-white/5 px-2 py-0.5 text-[10px] text-gray-300">
+      <Meh className="h-3 w-3" /> No try
+    </span>
+  );
+}
+
+function FeedRow({
+  item,
+  profile,
+  expanded,
+  failedReason,
+  onToggle,
+  onCopy,
+  onRetry,
+}: {
+  item: SignalFeedItemUI;
+  profile?: NDKUserProfile;
+  expanded: boolean;
+  failedReason?: string;
+  onToggle: () => void;
+  onCopy: (label: string, value: string) => void;
+  onRetry: () => void;
+}) {
+  const displayName =
+    profile?.name || profile?.displayName || shortHex(item.pubkey, 10, 4);
+  const content = item.content.trim();
+
+  return (
+    <article
+      className={cn(
+        "rounded-xl border border-white/10 bg-white/5 px-3 py-3 transition",
+        item.pending && !failedReason
+          ? "animate-pulse border-[#F7931A]/40"
+          : "",
+        failedReason ? "border-red-500/40" : "",
+      )}
+    >
+      <button
+        onClick={onToggle}
+        className="flex w-full items-start gap-3 text-left"
+      >
+        {profile?.image ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={profile.image}
+            alt={displayName}
+            className="h-8 w-8 rounded-full border border-white/20 object-cover"
+          />
+        ) : (
+          <div className="flex h-8 w-8 items-center justify-center rounded-full border border-white/20 bg-black/40 text-[10px] text-gray-300">
+            {displayName.slice(0, 2).toUpperCase()}
+          </div>
+        )}
+
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <p className="truncate text-xs font-semibold text-gray-100">
+              {displayName}
+            </p>
+            <FeedStatusBadge status={item.status} />
+            {item.pending && !failedReason && (
+              <span className="rounded-full border border-[#F7931A]/40 bg-[#F7931A]/10 px-2 py-0.5 text-[10px] text-[#F7931A]">
+                Pending…
+              </span>
+            )}
+          </div>
+          <p className="mt-1 text-[11px] text-gray-400">
+            {formatRelative(item.createdAtMs)}
+          </p>
+          <p className="mt-2 text-xs leading-relaxed text-gray-300">
+            {content || <span className="text-gray-500">No note attached</span>}
+          </p>
+          {failedReason && (
+            <div className="mt-2 rounded-md border border-red-500/30 bg-red-900/20 px-2 py-1 text-[11px] text-red-300">
+              Failed to broadcast: {failedReason}
+            </div>
+          )}
+        </div>
+
+        {expanded ? (
+          <ChevronUp className="mt-1 h-4 w-4 shrink-0 text-gray-500" />
+        ) : (
+          <ChevronDown className="mt-1 h-4 w-4 shrink-0 text-gray-500" />
+        )}
+      </button>
+
+      {expanded && (
+        <div className="mt-3 space-y-2 rounded-lg border border-white/10 bg-black/30 p-2 text-[11px] text-gray-300">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-gray-500">event_id</span>
+            <button
+              onClick={() => onCopy("event_id", item.id)}
+              className="inline-flex items-center gap-1 text-gray-300 hover:text-white"
+            >
+              <Copy className="h-3 w-3" /> {shortHex(item.id)}
+            </button>
+          </div>
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-gray-500">pubkey</span>
+            <button
+              onClick={() => onCopy("pubkey", item.pubkey)}
+              className="inline-flex items-center gap-1 text-gray-300 hover:text-white"
+            >
+              <Copy className="h-3 w-3" /> {shortHex(item.pubkey)}
+            </button>
+          </div>
+          <div className="text-gray-500">
+            created_at: {new Date(item.createdAtMs).toISOString()}
+          </div>
+          {failedReason && (
+            <button
+              onClick={onRetry}
+              className="mt-1 rounded-md border border-red-500/40 bg-red-500/10 px-2 py-1 text-[10px] uppercase tracking-widest text-red-200 hover:bg-red-500/20"
+            >
+              Retry this check-in
+            </button>
+          )}
+        </div>
+      )}
+    </article>
+  );
+}
+
 export default function MerchantDrawer({
   merchant,
   onClose,
 }: MerchantDrawerProps) {
-  const { session, loginWithExtension, loginWithNsec, publishSignal, ndk } =
-    useSession();
+  const identity = useIdentity();
+  const { session, ndk } = identity;
+  const { publishSignal } = identity.actions;
+  const transmitSignalFlow = useTransmitSignalFlow();
+  const gates = useFlowGates();
 
-  // Data State
-  const [reviews, setReviews] = useState<FeedItem[]>([]);
+  const placeId = merchant?.id ?? null;
+  const signerPreference =
+    session.type === "local_nsec"
+      ? "session_local_nsec"
+      : session.type === "nip07"
+        ? "session_nip07"
+        : "auto";
+
+  const placeFeed = useSignalFeed({
+    mode: "place",
+    placeId,
+    enabled: Boolean(placeId),
+  });
+
   const [profiles, setProfiles] = useState<ProfileMap>({});
-  const [loadingReviews, setLoadingReviews] = useState(false);
+  const hydratedPubkeysRef = useRef<Set<string>>(new Set());
 
-  // Login UI State
-  const [showNsecInput, setShowNsecInput] = useState(false);
-  const [nsec, setNsec] = useState("");
-  const [showSecret, setShowSecret] = useState(false);
-
-  // Reporting State
-  const [isReporting, setIsReporting] = useState(false);
-  const [paymentStatus, setPaymentStatus] = useState<
-    "success" | "failed" | "did_not_try"
-  >("success");
+  const [composerOpen, setComposerOpen] = useState(false);
+  const [composerStep, setComposerStep] = useState<ComposerStep>("broadcast");
+  const [paymentStatus, setPaymentStatus] = useState<SignalStatus>("success");
   const [comment, setComment] = useState("");
-
-  // UX State
   const [isPublishing, setIsPublishing] = useState(false);
   const [publishError, setPublishError] = useState<string | null>(null);
-  const [checkinStatus, setCheckinStatus] = useState<CheckinStatusState>("idle");
+  const [checkinStatus, setCheckinStatus] =
+    useState<CheckinStatusState>("idle");
   const [checkinReason, setCheckinReason] = useState<string | null>(null);
   const [activeCheckinId, setActiveCheckinId] = useState<string | null>(null);
+  const [failedBroadcastMap, setFailedBroadcastMap] =
+    useState<FailedBroadcastMap>({});
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [visibleCount, setVisibleCount] = useState(30);
+
   const pollRunIdRef = useRef(0);
-
-  // Reliability Score
-  const [reliability, setReliability] = useState(0);
-
-  // Scroll Ref
-  const feedTopRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     return () => {
@@ -94,63 +277,51 @@ export default function MerchantDrawer({
     };
   }, []);
 
-  // 1. Fetch Logic (index-backed API first, relay only for profiles)
+  useEffect(() => {
+    if (!placeId) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- reset local drawer state when selected merchant changes
+    setComposerOpen(false);
+    setComposerStep("broadcast");
+    setPaymentStatus("success");
+    setComment("");
+    setPublishError(null);
+    setCheckinStatus("idle");
+    setCheckinReason(null);
+    setActiveCheckinId(null);
+    setFailedBroadcastMap({});
+    setExpandedId(null);
+    setVisibleCount(30);
+  }, [placeId]);
+
   useEffect(() => {
     const run = async () => {
-      if (!merchant) {
-        setReviews([]);
-        setReliability(0);
-        return;
-      }
+      if (!ndk || placeFeed.items.length === 0) return;
+      const uniquePubkeys = Array.from(
+        new Set(placeFeed.items.map((n) => n.pubkey)),
+      );
+      const nextProfiles: ProfileMap = {};
 
-      setLoadingReviews(true);
-      setIsReporting(false);
-      setPaymentStatus("success");
-      setComment("");
-      setPublishError(null);
-      setCheckinStatus("idle");
-      setCheckinReason(null);
-      setActiveCheckinId(null);
+      await Promise.all(
+        uniquePubkeys.map(async (pk) => {
+          if (hydratedPubkeysRef.current.has(pk)) return;
+          hydratedPubkeysRef.current.add(pk);
+          try {
+            const user = ndk.getUser({ pubkey: pk });
+            const profile = await user.fetchProfile();
+            if (profile) nextProfiles[pk] = profile;
+          } catch {
+            // Keep feed rendering deterministic even if profile relay fetch fails.
+          }
+        }),
+      );
 
-      try {
-        const resp = await fetch(
-          `/api/places/${encodeURIComponent(merchant.id)}/feed`,
-        );
-        const json = await resp.json();
-        const payload = json?.data;
-        const notes: FeedItem[] = Array.isArray(payload?.items)
-          ? payload.items
-          : [];
-
-        setReviews(notes);
-        const confidence =
-          typeof payload?.confidence_score === "number"
-            ? payload.confidence_score / 100
-            : 0;
-        setReliability(confidence);
-
-        if (notes.length > 0 && ndk) {
-          const uniquePubkeys = Array.from(new Set(notes.map((n) => n.pubkey)));
-          const newProfiles: ProfileMap = {};
-          await Promise.all(
-            uniquePubkeys.map(async (pk) => {
-              const user = ndk.getUser({ pubkey: pk });
-              const profile = await user.fetchProfile();
-              if (profile) newProfiles[pk] = profile;
-            }),
-          );
-          setProfiles((prev) => ({ ...prev, ...newProfiles }));
-        }
-      } catch {
-        setReviews([]);
-        setReliability(0);
-      } finally {
-        setLoadingReviews(false);
+      if (Object.keys(nextProfiles).length > 0) {
+        setProfiles((prev) => ({ ...prev, ...nextProfiles }));
       }
     };
 
     void run();
-  }, [merchant, ndk]);
+  }, [ndk, placeFeed.items]);
 
   const categoryLabel =
     typeof merchant?.category === "string" && merchant.category
@@ -162,120 +333,267 @@ export default function MerchantDrawer({
     tagTruthy(merchant?.tags?.["currency:XBT"]) ||
     tagTruthy(merchant?.tags?.["payment:onchain"]);
 
-  // Handlers
-  const handleLoginStart = async () => {
-    if ((window as any).nostr) {
-      try {
-        await loginWithExtension();
-      } catch (e) {
-        setShowNsecInput(true);
-      }
-    } else {
-      setShowNsecInput(true);
+  const reliability = placeFeed.confidenceScore / 100;
+
+  const feedItems = placeFeed.items;
+  const visibleItems = useMemo(
+    () => feedItems.slice(0, visibleCount),
+    [feedItems, visibleCount],
+  );
+
+  const totalSignals = feedItems.length;
+  const successSignals = countSuccessfulSignals(feedItems);
+  const lastConfirmedAt = useMemo(() => {
+    const first = feedItems.find((item) => item.status === "success");
+    return first ? first.createdAtMs : null;
+  }, [feedItems]);
+
+  const successStreak = useMemo(() => {
+    let streak = 0;
+    for (const item of feedItems) {
+      if (item.status === "success") streak += 1;
+      else break;
+    }
+    return streak;
+  }, [feedItems]);
+
+  const latestEventId = feedItems[0]?.id || activeCheckinId || "";
+
+  const copyValue = async (label: string, value: string) => {
+    if (!value) return;
+    const ok = await copyText(value);
+    if (!ok) {
+      setPublishError(`Could not copy ${label}`);
     }
   };
 
-  const handleNsecSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!nsec.startsWith("nsec1")) {
-      alert("Invalid format");
+  const handleShare = async () => {
+    if (!merchant) return;
+    const text = `Checking ${merchant.name} on SatsRover (${merchant.id})`;
+
+    if (navigator.share) {
+      try {
+        await navigator.share({ text });
+        return;
+      } catch {
+        // fallback below
+      }
+    }
+
+    await copyValue("share text", text);
+  };
+
+  const openComposer = () => {
+    const nextAction = transmitSignalFlow.nextAction;
+    if (nextAction.kind === "need_identity") {
+      gates.openForAction(nextAction);
       return;
     }
-    await loginWithNsec(nsec);
-    setShowNsecInput(false);
+    if (nextAction.kind === "need_wallet") {
+      setPublishError("reason_code: flow_unexpected_wallet_gate");
+      return;
+    }
+    if (nextAction.kind === "error") {
+      setPublishError(`reason_code: ${nextAction.reason || "flow_error"}`);
+      return;
+    }
+    setComposerStep("broadcast");
+    setComposerOpen(true);
+  };
+
+  const retryDraftFromItem = (item: SignalFeedItemUI) => {
+    setPaymentStatus(item.status);
+    setComment(item.content);
+    setComposerStep("broadcast");
+    setComposerOpen(true);
+  };
+
+  const pollCheckinStatus = async (
+    checkinId: string,
+    pubkey: string,
+    placeId: string,
+  ) => {
+    const runId = ++pollRunIdRef.current;
+    const startedAt = Date.now();
+
+    while (Date.now() - startedAt < 20000) {
+      if (pollRunIdRef.current !== runId) return;
+
+      try {
+        const params = new URLSearchParams({
+          checkin_id: checkinId,
+          pubkey,
+          place_id: placeId,
+        });
+        const resp = await fetch(
+          `/api/checkins/status?${params.toString()}`,
+          { method: "GET" },
+        );
+        const data = await resp.json().catch(() => null);
+        const status =
+          (data?.status as CheckinStatusState | undefined) || "failed";
+        const reason = (data?.reason_code as string | null | undefined) ?? null;
+
+        if (status === "ok" || status === "failed" || status === "not_found") {
+          setCheckinStatus(status);
+          setCheckinReason(reason);
+          return;
+        }
+
+        setCheckinStatus("pending");
+      } catch {
+        // Keep retrying until timeout.
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 800));
+    }
+
+    if (pollRunIdRef.current === runId) {
+      setCheckinStatus("failed");
+      setCheckinReason("status_timeout");
+    }
   };
 
   const handleSubmitReport = async () => {
     if (!merchant) return;
-    if (checkinStatus === "pending") return;
+    const actorPubkey = session.pubkey;
+    if (!actorPubkey) {
+      gates.openForAction({
+        kind: "need_identity",
+        reason: "missing_identity",
+      });
+      return;
+    }
+    if (isPublishing || checkinStatus === "pending") return;
+
+    const nextAction = transmitSignalFlow.nextAction;
+    if (nextAction.kind !== "run") {
+      if (nextAction.kind === "need_identity") gates.openForAction(nextAction);
+      else setPublishError(`reason_code: ${nextAction.reason || "flow_error"}`);
+      return;
+    }
 
     setIsPublishing(true);
     setPublishError(null);
     setCheckinStatus("pending");
     setCheckinReason(null);
-    setActiveCheckinId(null);
 
-    const pollCheckinStatus = async (checkinId: string) => {
-      const runId = ++pollRunIdRef.current;
-      const startedAt = Date.now();
-
-      while (Date.now() - startedAt < 20_000) {
-        if (pollRunIdRef.current !== runId) return;
-        try {
-          const resp = await fetch(
-            `/api/checkins/status?checkin_id=${encodeURIComponent(checkinId)}`,
-            { method: "GET" },
-          );
-          const data = await resp.json().catch(() => null);
-          const status = (data?.status as CheckinStatusState | undefined) || "failed";
-          const reason = (data?.reason_code as string | null | undefined) ?? null;
-          if (status === "ok" || status === "failed" || status === "not_found") {
-            setCheckinStatus(status);
-            setCheckinReason(reason);
-            return;
-          }
-          setCheckinStatus("pending");
-        } catch {
-          // Keep retrying until timeout.
-        }
-        await new Promise((resolve) => setTimeout(resolve, 800));
-      }
-
-      if (pollRunIdRef.current === runId) {
-        setCheckinStatus("failed");
-        setCheckinReason("status_timeout");
-      }
-    };
-
-    // 1) Create check-in intent
     let intentToken = "";
+    let intentReasonCode = "missing_intent_token";
     try {
       const intentAuth = await buildAuthHeaders({
-        pubkey: session.pubkey || "",
+        pubkey: actorPubkey,
         method: "POST",
         path: "/v1/checkins/intent",
         nonce: randomNonce(),
         bodyBytes: new Uint8Array(),
+        signerPreference,
       });
+
       const intentRes = await fetch("/api/checkins/intent", {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          "x-pubkey": session.pubkey || "",
+          "x-pubkey": actorPubkey,
           "x-auth-event": intentAuth.authEvent,
           "x-auth-nonce": intentAuth.nonce,
         },
         body: JSON.stringify({ placeId: merchant.id }),
       });
-      const intentData = await intentRes.json();
-      intentToken = intentData.intent_token || "";
-    } catch (e: any) {
-      if ((e as Error)?.message === "missing_signer") {
-        setPublishError("Missing signer for check-in ownership proof");
-      }
+
+      const intentData = await intentRes.json().catch(() => ({}));
+      intentReasonCode =
+        typeof intentData?.reason_code === "string"
+          ? intentData.reason_code
+          : intentReasonCode;
+      intentToken =
+        typeof intentData?.intent_token === "string"
+          ? intentData.intent_token
+          : "";
+    } catch (error) {
+      intentReasonCode =
+        error instanceof Error && error.message
+          ? error.message
+          : intentReasonCode;
       intentToken = "";
     }
 
-    // 2) Publish to relays
-    const publishResult = await publishSignal(merchant.id, paymentStatus, comment);
+    const publishResult = await transmitSignalFlow.run(async () =>
+      publishSignal(merchant.id, paymentStatus, comment),
+    );
 
-    // 3) Confirm lifecycle with backend
-    if (publishResult.ok && intentToken) {
-      const checkinId = publishResult.eventId || "";
+    if (!publishResult.ok || !publishResult.eventId) {
+      const failedId = `failed-${Date.now()}`;
+      placeFeed.addOptimistic(
+        createOptimisticSignalFeedItem({
+          id: failedId,
+          placeId: merchant.id,
+          pubkey: actorPubkey,
+          status: paymentStatus,
+          content: comment,
+        }),
+      );
+      setFailedBroadcastMap((prev) => ({
+        ...prev,
+        [failedId]: "relay_publish_failed",
+      }));
+      setPublishError(
+        "Signal failed to reach relays. You can retry this draft.",
+      );
+      setCheckinStatus("failed");
+      setCheckinReason("relay_publish_failed");
+      setIsPublishing(false);
+      return;
+    }
+
+    const eventId = publishResult.eventId;
+    setActiveCheckinId(eventId);
+
+    placeFeed.addOptimistic(
+      createOptimisticSignalFeedItem({
+        id: eventId,
+        placeId: merchant.id,
+        pubkey: actorPubkey,
+        status: paymentStatus,
+        content: comment,
+      }),
+    );
+
+    const actorProfile = session.profile;
+    if (actorProfile) {
+      setProfiles((prev) => ({
+        ...prev,
+        [actorPubkey]: actorProfile,
+      }));
+    }
+
+    if (!intentToken) {
+      setCheckinStatus("failed");
+      setCheckinReason("missing_intent_token");
+      setPublishError(
+        `Intent creation failed (auth/signature). reason_code: ${intentReasonCode}`,
+      );
+      setIsPublishing(false);
+      return;
+    }
+
+    try {
       const confirmPayload = {
-        event_id: checkinId,
+        event_id: eventId,
         place_id: merchant.id,
-        pubkey: session.pubkey,
+        pubkey: actorPubkey,
         payment_evidence: null,
       };
       const confirmBody = JSON.stringify(confirmPayload);
       const confirmAuth = await buildAuthHeaders({
-        pubkey: session.pubkey || "",
+        pubkey: actorPubkey,
         method: "POST",
         path: "/v1/checkins/confirm",
         nonce: randomNonce(),
         bodyBytes: new TextEncoder().encode(confirmBody),
+        signerPreference,
       });
+
       await fetch("/api/checkins/confirm", {
         method: "POST",
         headers: {
@@ -286,64 +604,26 @@ export default function MerchantDrawer({
         },
         body: confirmBody,
       });
-      if (!checkinId) {
-        setCheckinStatus("failed");
-        setCheckinReason("missing_checkin_id");
-      } else {
-        setActiveCheckinId(checkinId);
-        await pollCheckinStatus(checkinId);
-      }
-    } else if (publishResult.ok) {
-      setCheckinStatus("failed");
-      setCheckinReason("missing_intent_token");
+    } catch {
+      // Confirmation errors are reflected in poll status or follow-up refresh.
     }
+
+    await pollCheckinStatus(eventId, actorPubkey, merchant.id);
 
     setIsPublishing(false);
+    setComposerStep("pay");
+    setComposerOpen(true);
 
-    if (publishResult.ok) {
-      // 2. Optimistic UI Update (Show immediately without refetch)
-      const statusEmoji =
-        paymentStatus === "success"
-          ? "✅"
-          : paymentStatus === "failed"
-            ? "❌"
-            : "👀";
+    setTimeout(() => {
+      void placeFeed.refresh();
+    }, 1200);
 
-      const optimisticNote: FeedItem = {
-        event_id: `opt-${Date.now()}`,
-        pubkey: session.pubkey || "unknown",
-        created_at: new Date().toISOString(),
-        content: `${statusEmoji} ${comment}`,
-        status: paymentStatus,
-      };
-
-      setReviews((prev) => [optimisticNote, ...prev]);
-
-      // Add current user profile to map if missing
-      if (session.user?.profile && session.pubkey) {
-        setProfiles((prev) => ({
-          ...prev,
-          [session.pubkey!]: session.user!.profile!,
-        }));
-      }
-
-      setIsReporting(false);
-
-      // Scroll to top
-      setTimeout(() => {
-        feedTopRef.current?.scrollIntoView({
-          behavior: "smooth",
-          block: "center",
-        });
-      }, 100);
-    } else {
-      setPublishError("Signal failed to reach relays. Please retry.");
-      setCheckinStatus("failed");
-      setCheckinReason("relay_publish_failed");
-    }
+    setTimeout(() => {
+      void placeFeed.refresh();
+    }, 3000);
   };
 
-  const successCount = reviews.filter((r) => r.status === "success").length;
+  const showLoadMore = visibleCount < feedItems.length;
 
   return (
     <div
@@ -352,362 +632,363 @@ export default function MerchantDrawer({
         merchant ? "translate-y-0" : "translate-y-full",
       )}
     >
-      {/* Neon Top Border */}
-      <div className="h-px w-full bg-linear-to-r from-transparent via-[#F7931A] to-transparent shadow-[0_0_10px_#F7931A]" />
+      <div className="h-px w-full bg-linear-to-r from-transparent via-[#F7931A] to-transparent shadow-[0_0_12px_#F7931A]" />
 
-      <div className="bg-[#050505] border-t border-white/10 pb-10 pt-4 px-6 shadow-2xl min-h-[50vh] max-h-[85vh] overflow-y-auto font-mono text-gray-200">
-        {/* Drag Handle */}
-        <div className="w-12 h-1 bg-white/20 rounded-full mx-auto mb-6" />
+      <div className="max-h-[88vh] min-h-[52vh] overflow-y-auto border-t border-white/10 bg-linear-to-b from-[#0b0b0d]/95 to-[#050505] px-5 pb-10 pt-4 text-gray-200 shadow-2xl backdrop-blur-md">
+        <div className="mx-auto mb-5 h-1 w-12 rounded-full bg-white/20" />
 
         {merchant && (
           <>
-            {/* Header Section */}
-            <div className="flex justify-between items-start mb-2">
-              <div>
-                <h2 className="text-2xl font-bold text-white tracking-tight uppercase">
-                  {merchant.name || "Bitcoin Merchant"}
-                </h2>
-                <div className="flex items-center text-[#F7931A] text-xs mt-1 uppercase tracking-widest font-bold">
-                  <MapPin className="w-3 h-3 mr-1" />
-                  <span>{categoryLabel}</span>
+            <header className="mb-5 rounded-2xl border border-white/10 bg-white/5 p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <h2 className="truncate text-xl font-semibold tracking-tight text-white">
+                    {merchant.name || "Bitcoin Merchant"}
+                  </h2>
+                  <div className="mt-1 flex items-center gap-2 text-xs text-gray-400">
+                    <span className="inline-flex items-center gap-1 rounded-full border border-[#F7931A]/30 bg-[#F7931A]/10 px-2 py-0.5 text-[#F7931A]">
+                      <MapPin className="h-3 w-3" />
+                      {categoryLabel}
+                    </span>
+                    {hasLightning && (
+                      <span className="inline-flex items-center gap-1 rounded-full border border-[#F7931A]/30 px-2 py-0.5 text-[#F7931A]">
+                        <Zap className="h-3 w-3" /> LN
+                      </span>
+                    )}
+                    {hasOnchain && (
+                      <span className="inline-flex items-center gap-1 rounded-full border border-white/20 px-2 py-0.5 text-gray-300">
+                        <Bitcoin className="h-3 w-3" /> Onchain
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                <button
+                  onClick={onClose}
+                  className="rounded-full p-2 text-gray-400 transition hover:bg-white/10 hover:text-white"
+                  aria-label="Close merchant drawer"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+
+              <div className="mt-4">
+                <div className="mb-1 flex items-center justify-between text-[11px] text-gray-400">
+                  <span className="inline-flex items-center gap-1">
+                    <Signal className="h-3.5 w-3.5" /> Confidence
+                  </span>
+                  <span>{Math.round(reliability * 100)}%</span>
+                </div>
+                <div className="h-2 rounded-full bg-black/40">
+                  <div
+                    className={cn(
+                      "h-2 rounded-full transition-all",
+                      reliability >= 0.7
+                        ? "bg-[#00FF41]"
+                        : reliability >= 0.4
+                          ? "bg-[#F7931A]"
+                          : "bg-gray-500",
+                    )}
+                    style={{
+                      width: `${Math.max(4, Math.min(100, reliability * 100))}%`,
+                    }}
+                  />
                 </div>
               </div>
-              <button
-                onClick={onClose}
-                className="p-2 hover:bg-white/10 rounded-full transition-colors text-gray-500 hover:text-white"
-              >
-                <X className="w-6 h-6" />
-              </button>
-            </div>
 
-            {/* Signal Strength Indicator */}
-            <div className="mb-6 flex items-center">
-              {reliability >= 0.7 ? (
-                <div className="inline-flex items-center gap-2 text-[#00FF41] text-[10px] border border-[#00FF41]/30 bg-[#00FF41]/5 px-3 py-1.5 rounded uppercase tracking-widest shadow-[0_0_8px_rgba(0,255,65,0.1)]">
-                  <Activity className="w-3 h-3" />
-                  <span className="font-bold">VERIFIED: HIGH CONFIDENCE</span>
-                </div>
-              ) : reliability >= 0.4 ? (
-                <div className="inline-flex items-center gap-2 text-[#F7931A] text-[10px] border border-[#F7931A]/30 bg-[#F7931A]/5 px-3 py-1.5 rounded uppercase tracking-widest">
-                  <Signal className="w-3 h-3" />
-                  <span className="font-bold">
-                    PARTIALLY VERIFIED ({successCount})
-                  </span>
-                </div>
-              ) : (
-                <div className="inline-flex items-center gap-2 text-gray-500 text-[10px] border border-white/10 bg-white/5 px-3 py-1.5 rounded uppercase tracking-widest">
-                  <Signal className="w-3 h-3" />
-                  <span className="font-bold">UNVERIFIED SIGNAL</span>
-                </div>
-              )}
-            </div>
+              <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-5">
+                <button
+                  onClick={openComposer}
+                  className="inline-flex items-center justify-center gap-1 rounded-lg border border-[#F7931A]/40 bg-[#F7931A]/10 px-3 py-2 text-[11px] font-semibold text-[#F7931A] hover:bg-[#F7931A]/20"
+                >
+                  <Zap className="h-3.5 w-3.5" /> Check in
+                </button>
+                <button
+                  onClick={() => copyValue("event id", latestEventId)}
+                  className="inline-flex items-center justify-center gap-1 rounded-lg border border-white/15 bg-black/30 px-3 py-2 text-[11px] text-gray-300 hover:bg-white/5"
+                >
+                  <Copy className="h-3.5 w-3.5" /> Copy event
+                </button>
+                <button
+                  onClick={() => copyValue("place id", merchant.id)}
+                  className="inline-flex items-center justify-center gap-1 rounded-lg border border-white/15 bg-black/30 px-3 py-2 text-[11px] text-gray-300 hover:bg-white/5"
+                >
+                  <Copy className="h-3.5 w-3.5" /> Copy place
+                </button>
+                <button
+                  onClick={handleShare}
+                  className="inline-flex items-center justify-center gap-1 rounded-lg border border-white/15 bg-black/30 px-3 py-2 text-[11px] text-gray-300 hover:bg-white/5"
+                >
+                  <Share2 className="h-3.5 w-3.5" /> Share
+                </button>
+                <a
+                  href={`https://www.google.com/maps/dir/?api=1&destination=${merchant.lat},${merchant.lon}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center justify-center gap-1 rounded-lg border border-white/15 bg-black/30 px-3 py-2 text-[11px] text-gray-300 hover:bg-white/5"
+                >
+                  <Navigation className="h-3.5 w-3.5" /> Maps
+                </a>
+              </div>
 
-            {/* Badges */}
-            <div className="flex flex-wrap gap-2 mb-8">
-              {hasLightning && (
-                <span className="inline-flex items-center px-2 py-1 rounded border border-[#F7931A]/40 text-[#F7931A] text-[9px] font-bold uppercase tracking-wider bg-[#F7931A]/5">
-                  <Zap className="w-3 h-3 mr-1 fill-[#F7931A]" /> Lightning
+              <div className="mt-3 grid grid-cols-2 gap-3 rounded-xl border border-white/10 bg-black/30 p-3 text-[11px] sm:grid-cols-4">
+                <div>
+                  <p className="text-gray-500">Total signals</p>
+                  <p className="mt-1 font-semibold text-gray-100">
+                    {totalSignals}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-gray-500">Success count</p>
+                  <p className="mt-1 font-semibold text-[#00FF41]">
+                    {successSignals}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-gray-500">Current streak</p>
+                  <p className="mt-1 font-semibold text-[#F7931A]">
+                    {successStreak}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-gray-500">Last confirmed</p>
+                  <p className="mt-1 font-semibold text-gray-100">
+                    {lastConfirmedAt ? formatRelative(lastConfirmedAt) : "n/a"}
+                  </p>
+                </div>
+              </div>
+
+              <div className="mt-3 flex items-center justify-between rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-[11px] text-gray-400">
+                <span className="inline-flex items-center gap-1">
+                  <Sparkles className="h-3.5 w-3.5" /> AI Summary (soon)
                 </span>
-              )}
-              {hasOnchain && (
-                <span className="inline-flex items-center px-2 py-1 rounded border border-white/20 text-gray-400 text-[9px] font-bold uppercase tracking-wider bg-white/5">
-                  <Bitcoin className="w-3 h-3 mr-1" /> On-Chain
+                <span
+                  className="cursor-help"
+                  title={getFutureAiSummaryHint(merchant.id)}
+                >
+                  coming soon
                 </span>
-              )}
-            </div>
+              </div>
+            </header>
 
-            {/* ACTION AREA */}
-            <div className="mb-8 p-1 bg-white/5 rounded-xl border border-white/5">
-              {session.type === "anon" ? (
-                // 1. LOGIN REQUIRED
-                showNsecInput ? (
-                  <form
-                    onSubmit={handleNsecSubmit}
-                    className="p-4 animate-in fade-in"
+            {publishError && (
+              <div className="mb-4 rounded-lg border border-red-500/30 bg-red-900/20 px-3 py-2 text-xs text-red-300">
+                {publishError}
+              </div>
+            )}
+
+            {(checkinStatus === "pending" ||
+              checkinStatus === "failed" ||
+              checkinStatus === "not_found" ||
+              checkinStatus === "ok") && (
+              <div className="mb-4 rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-xs">
+                {checkinStatus === "pending" && (
+                  <div className="inline-flex items-center gap-2 text-[#F7931A]">
+                    <Loader2 className="h-4 w-4 animate-spin" /> Verifying
+                    check-in...
+                  </div>
+                )}
+                {checkinStatus === "ok" && (
+                  <div className="inline-flex items-center gap-2 text-[#00FF41]">
+                    <CheckCircle2 className="h-4 w-4" /> Check-in confirmed.
+                  </div>
+                )}
+                {(checkinStatus === "failed" ||
+                  checkinStatus === "not_found") && (
+                  <div className="inline-flex items-center gap-2 text-red-300">
+                    <AlertCircle className="h-4 w-4" />
+                    Verification{" "}
+                    {checkinStatus === "not_found" ? "not found" : "failed"}
+                    {checkinReason ? ` (${checkinReason})` : ""}
+                  </div>
+                )}
+                {activeCheckinId && (
+                  <div className="mt-1 text-[11px] text-gray-500">
+                    event {shortHex(activeCheckinId)}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {composerOpen && (
+              <section className="mb-4 rounded-xl border border-[#F7931A]/30 bg-[#F7931A]/5 p-4">
+                <div className="mb-3 flex items-center justify-between">
+                  <h3 className="text-xs font-semibold uppercase tracking-widest text-[#F7931A]">
+                    Check-in Composer
+                  </h3>
+                  <button
+                    onClick={() => setComposerOpen(false)}
+                    className="text-xs text-gray-400 hover:text-white"
                   >
-                    <div className="flex justify-between items-center mb-4">
-                      <label className="text-[10px] font-bold text-[#F7931A] uppercase tracking-widest">
-                        Manual Uplink
-                      </label>
-                      <button
-                        type="button"
-                        onClick={() => setShowNsecInput(false)}
-                      >
-                        <X className="w-4 h-4 text-gray-500 hover:text-white" />
-                      </button>
-                    </div>
-                    <div className="relative mb-3">
-                      <input
-                        type={showSecret ? "text" : "password"}
-                        placeholder="nsec1..."
-                        className="w-full bg-black text-sm text-white p-3 pr-10 border border-white/20 rounded focus:border-[#F7931A] focus:outline-none transition-colors font-mono"
-                        value={nsec}
-                        onChange={(e) => setNsec(e.target.value)}
-                      />
-                      <button
-                        type="button"
-                        onClick={() => setShowSecret(!showSecret)}
-                        className="absolute right-3 top-3.5 text-gray-500 hover:text-white"
-                      >
-                        {showSecret ? (
-                          <EyeOff className="w-4 h-4" />
-                        ) : (
-                          <Eye className="w-4 h-4" />
-                        )}
-                      </button>
-                    </div>
-                    <button
-                      type="submit"
-                      className="w-full bg-[#F7931A] text-black text-xs font-bold py-3 rounded uppercase tracking-widest hover:brightness-110"
-                    >
-                      Authenticate
-                    </button>
-                  </form>
+                    Close
+                  </button>
+                </div>
+
+                {session.type === "anon" ? (
+                  <button
+                    onClick={() =>
+                      gates.openForAction({
+                        kind: "need_identity",
+                        reason: "missing_identity",
+                      })
+                    }
+                    className="inline-flex items-center gap-2 rounded-lg border border-white/20 bg-black/30 px-3 py-2 text-xs text-gray-200"
+                  >
+                    <KeyRound className="h-4 w-4" /> Login to continue
+                  </button>
                 ) : (
-                  <button
-                    onClick={handleLoginStart}
-                    className="w-full py-6 flex flex-col items-center justify-center gap-2 group"
-                  >
-                    <KeyRound className="w-6 h-6 text-gray-500 group-hover:text-[#F7931A] transition-colors" />
-                    <span className="text-xs uppercase tracking-widest font-bold text-gray-400 group-hover:text-white">
-                      Login to Broadcast
-                    </span>
-                  </button>
-                )
-              ) : !isReporting ? (
-                // 2. ACTIONS (LOGGED IN)
-                <div className="grid grid-cols-2 gap-1">
-                  <button
-                    onClick={() => setIsReporting(true)}
-                    className="bg-[#F7931A] text-black font-bold py-4 rounded-lg flex items-center justify-center gap-2 hover:brightness-110 transition-all uppercase tracking-wide text-xs"
-                  >
-                    <Zap className="w-4 h-4 fill-black" /> Report Status
-                  </button>
-                  <a
-                    href={`https://www.google.com/maps/dir/?api=1&destination=${merchant.lat},${merchant.lon}`}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="bg-black/40 text-gray-300 font-bold py-4 rounded-lg flex items-center justify-center gap-2 hover:bg-white/10 transition-all uppercase tracking-wide text-xs"
-                  >
-                    <Navigation className="w-4 h-4" /> Navigate
-                  </a>
-                </div>
-              ) : (
-                // 3. REPORTING FORM
-                <div className="p-4 animate-in zoom-in-95">
-                  <h4 className="text-xs font-bold text-gray-400 mb-4 uppercase tracking-widest text-center">
-                    Confirm Payment Status
-                  </h4>
-
-                  {publishError && (
-                    <div className="mb-4 p-3 bg-red-900/20 border border-red-500/30 rounded text-red-400 text-xs flex items-center gap-2">
-                      <AlertCircle className="w-4 h-4 shrink-0" />
-                      {publishError}
-                    </div>
-                  )}
-
-                  {checkinStatus === "pending" && (
-                    <div className="mb-4 p-3 bg-[#F7931A]/10 border border-[#F7931A]/30 rounded text-[#F7931A] text-xs flex items-center gap-2">
-                      <Loader2 className="w-4 h-4 shrink-0 animate-spin" />
-                      <div>
-                        <div className="font-bold">Verifying check-in...</div>
-                        {activeCheckinId && (
-                          <div className="text-[10px] text-[#F7931A]/80 font-mono mt-1">
-                            {activeCheckinId.slice(0, 12)}...
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  )}
-
-                  {checkinStatus === "ok" && (
-                    <div className="mb-4 p-3 bg-[#00FF41]/10 border border-[#00FF41]/30 rounded text-[#00FF41] text-xs flex items-center gap-2">
-                      <CheckCircle2 className="w-4 h-4 shrink-0" />
-                      Check-in confirmed.
-                    </div>
-                  )}
-
-                  {(checkinStatus === "failed" || checkinStatus === "not_found") && (
-                    <div className="mb-4 p-3 bg-red-900/20 border border-red-500/30 rounded text-red-300 text-xs">
-                      <div className="flex items-center gap-2">
-                        <AlertCircle className="w-4 h-4 shrink-0" />
-                        <span className="font-bold">
-                          Check-in verification {checkinStatus === "not_found" ? "not found" : "failed"}.
-                        </span>
-                      </div>
-                      {checkinReason && (
-                        <div className="mt-2 text-[10px] text-red-300/80 font-mono">
-                          reason_code: {checkinReason}
+                  <>
+                    {composerStep === "broadcast" ? (
+                      <>
+                        <p className="mb-2 text-[11px] text-gray-400">
+                          Step 1: broadcast your Nostr check-in proof.
+                        </p>
+                        <div className="mb-3 grid grid-cols-3 gap-2">
+                          <button
+                            onClick={() => setPaymentStatus("success")}
+                            className={cn(
+                              "rounded-lg border px-2 py-2 text-[11px]",
+                              paymentStatus === "success"
+                                ? "border-[#00FF41]/50 bg-[#00FF41]/10 text-[#00FF41]"
+                                : "border-white/20 bg-black/30 text-gray-300",
+                            )}
+                          >
+                            <ThumbsUp className="mx-auto mb-1 h-4 w-4" /> Worked
+                          </button>
+                          <button
+                            onClick={() => setPaymentStatus("failed")}
+                            className={cn(
+                              "rounded-lg border px-2 py-2 text-[11px]",
+                              paymentStatus === "failed"
+                                ? "border-red-500/50 bg-red-500/10 text-red-300"
+                                : "border-white/20 bg-black/30 text-gray-300",
+                            )}
+                          >
+                            <ThumbsDown className="mx-auto mb-1 h-4 w-4" />{" "}
+                            Failed
+                          </button>
+                          <button
+                            onClick={() => setPaymentStatus("did_not_try")}
+                            className={cn(
+                              "rounded-lg border px-2 py-2 text-[11px]",
+                              paymentStatus === "did_not_try"
+                                ? "border-white/50 bg-white/10 text-white"
+                                : "border-white/20 bg-black/30 text-gray-300",
+                            )}
+                          >
+                            <Meh className="mx-auto mb-1 h-4 w-4" /> No try
+                          </button>
                         </div>
-                      )}
-                      <button
-                        onClick={handleSubmitReport}
-                        disabled={isPublishing}
-                        className="mt-3 bg-red-500/20 border border-red-500/40 text-red-200 px-3 py-1.5 rounded text-[10px] uppercase tracking-widest hover:bg-red-500/30 disabled:opacity-50"
-                      >
-                        Retry Check-in
-                      </button>
-                    </div>
-                  )}
 
-                  <div className="flex gap-2 mb-4">
-                    <button
-                      onClick={() => setPaymentStatus("success")}
-                      className={cn(
-                        "flex-1 py-3 rounded border flex flex-col items-center gap-1 transition-all",
-                        paymentStatus === "success"
-                          ? "bg-[#00FF41]/10 border-[#00FF41] text-[#00FF41]"
-                          : "bg-black border-white/10 text-gray-500 hover:border-white/30",
-                      )}
-                    >
-                      <ThumbsUp className="w-4 h-4" />{" "}
-                      <span className="text-[9px] font-bold uppercase">
-                        Worked
-                      </span>
-                    </button>
-                    <button
-                      onClick={() => setPaymentStatus("failed")}
-                      className={cn(
-                        "flex-1 py-3 rounded border flex flex-col items-center gap-1 transition-all",
-                        paymentStatus === "failed"
-                          ? "bg-[#FF3B30]/10 border-[#FF3B30] text-[#FF3B30]"
-                          : "bg-black border-white/10 text-gray-500 hover:border-white/30",
-                      )}
-                    >
-                      <ThumbsDown className="w-4 h-4" />{" "}
-                      <span className="text-[9px] font-bold uppercase">
-                        Failed
-                      </span>
-                    </button>
-                    <button
-                      onClick={() => setPaymentStatus("did_not_try")}
-                      className={cn(
-                        "flex-1 py-3 rounded border flex flex-col items-center gap-1 transition-all",
-                        paymentStatus === "did_not_try"
-                          ? "bg-white/10 border-white text-white"
-                          : "bg-black border-white/10 text-gray-500 hover:border-white/30",
-                      )}
-                    >
-                      <Meh className="w-4 h-4" />{" "}
-                      <span className="text-[9px] font-bold uppercase">
-                        No Try
-                      </span>
-                    </button>
-                  </div>
+                        <textarea
+                          className="mb-3 h-24 w-full resize-none rounded-lg border border-white/20 bg-black/40 p-3 text-sm text-gray-200 placeholder:text-gray-600 focus:border-[#F7931A] focus:outline-none"
+                          placeholder="Optional note for future rovers..."
+                          value={comment}
+                          onChange={(e) => setComment(e.target.value)}
+                        />
 
-                  <textarea
-                    className="w-full p-3 bg-[#050505] text-sm text-gray-300 border border-white/20 rounded mb-4 h-24 resize-none focus:outline-none focus:border-[#F7931A] font-mono placeholder:text-gray-700"
-                    placeholder="Add intel (e.g. 'Terminal behind counter')..."
-                    value={comment}
-                    onChange={(e) => setComment(e.target.value)}
-                  />
+                        <button
+                          onClick={handleSubmitReport}
+                          disabled={isPublishing || checkinStatus === "pending"}
+                          className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-[#F7931A] px-3 py-2 text-xs font-semibold uppercase tracking-widest text-black disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          {isPublishing ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <Zap className="h-4 w-4" />
+                          )}
+                          {isPublishing ? "Broadcasting" : "Broadcast Check-in"}
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <p className="mb-2 text-[11px] text-gray-400">
+                          Step 2 (optional): add payment proof or boost. This
+                          step never runs unless you trigger it.
+                        </p>
+                        <div className="grid gap-2 sm:grid-cols-2">
+                          <button
+                            onClick={() =>
+                              gates.openForAction({
+                                kind: "need_wallet",
+                                reason: "optional_payment",
+                              })
+                            }
+                            className="rounded-lg border border-white/20 bg-black/30 px-3 py-2 text-xs text-gray-200 hover:bg-white/5"
+                          >
+                            Open wallet / NWC
+                          </button>
+                          <button
+                            onClick={() => setComposerOpen(false)}
+                            className="rounded-lg border border-[#F7931A]/30 bg-[#F7931A]/10 px-3 py-2 text-xs text-[#F7931A] hover:bg-[#F7931A]/20"
+                          >
+                            Done
+                          </button>
+                        </div>
+                      </>
+                    )}
+                  </>
+                )}
+              </section>
+            )}
 
-                  <div className="flex gap-2">
-                    <button
-                      onClick={handleSubmitReport}
-                      disabled={isPublishing || checkinStatus === "pending"}
-                      className="flex-1 bg-[#F7931A] text-black font-bold py-3 rounded text-xs uppercase tracking-widest hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-                    >
-                      {isPublishing ? (
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                      ) : (
-                        <Zap className="w-4 h-4 fill-black" />
-                      )}
-                      {isPublishing ? "Broadcasting..." : checkinStatus === "pending" ? "Verifying..." : "Transmit Signal"}
-                    </button>
-                    <button
-                      onClick={() => setIsReporting(false)}
-                      disabled={isPublishing}
-                      className="px-4 border border-white/20 text-gray-400 font-bold py-3 rounded text-xs uppercase tracking-widest hover:bg-white/5 disabled:opacity-50"
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
+            <section className="pt-2">
+              <div className="mb-3 flex items-center justify-between">
+                <h3 className="text-[11px] uppercase tracking-[0.2em] text-gray-500">
+                  Place timeline
+                </h3>
+                {placeFeed.loading && (
+                  <span className="inline-flex items-center gap-1 text-[11px] text-[#F7931A]">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" /> Syncing
+                  </span>
+                )}
+              </div>
 
-            {/* FEED SECTION */}
-            <div className="border-t border-white/10 pt-6">
-              <div ref={feedTopRef} />
-              <h3 className="text-[10px] font-bold text-gray-500 uppercase tracking-[0.2em] mb-4">
-                Signal Feed
-              </h3>
-
-              {loadingReviews ? (
-                <div className="text-xs text-[#F7931A] animate-pulse font-mono">
-                  Loading indexed signal feed...
-                </div>
-              ) : reviews.length === 0 ? (
-                <div className="text-xs text-gray-600 font-mono">
+              {feedItems.length === 0 && !placeFeed.loading ? (
+                <div className="rounded-lg border border-white/10 bg-black/20 px-3 py-3 text-xs text-gray-500">
                   No signals detected in this sector.
                 </div>
               ) : (
-                <div className="space-y-3">
-                  {reviews.map((note) => {
-                    const profile = profiles[note.pubkey];
-                    const name =
-                      profile?.name ||
-                      profile?.displayName ||
-                      note.pubkey.slice(0, 8);
-                    const image = profile?.image;
-
-                    const isSuccess = note.status === "success";
-                    const isFail = note.status === "failed";
-
-                    return (
-                      <div
-                        key={note.event_id}
-                        className="bg-white/5 border border-white/5 p-3 rounded hover:border-white/10 transition-colors animate-in fade-in slide-in-from-top-2"
-                      >
-                        <div className="flex items-center gap-3 mb-2">
-                          {image ? (
-                            // eslint-disable-next-line @next/next/no-img-element
-                            <img
-                              src={image}
-                              alt={name}
-                              className="w-6 h-6 rounded-full object-cover grayscale opacity-80"
-                            />
-                          ) : (
-                            <div className="w-6 h-6 bg-white/10 rounded-full flex items-center justify-center text-[8px] text-gray-400 font-bold">
-                              {name.slice(0, 2).toUpperCase()}
-                            </div>
-                          )}
-
-                          <span className="font-bold text-gray-300 text-xs truncate max-w-37.5">
-                            {name}
-                          </span>
-
-                          <span className="text-[9px] text-gray-600 ml-auto font-mono">
-                            {new Date(
-                              new Date(note.created_at).getTime(),
-                            ).toLocaleDateString()}
-                          </span>
-                        </div>
-
-                        <div className="flex gap-2 items-start">
-                          {isSuccess && (
-                            <CheckCircle2 className="w-3 h-3 text-[#00FF41] mt-0.5 shrink-0" />
-                          )}
-                          {isFail && (
-                            <AlertCircle className="w-3 h-3 text-[#FF3B30] mt-0.5 shrink-0" />
-                          )}
-                          <p className="text-gray-400 text-xs leading-relaxed wrap-break-word w-full">
-                            {note.content
-                              .replace(/Checking in at .* ⚡ #SatsRover/, "")
-                              .replace(/✅|❌|👀/, "")
-                              .trim()}
-                          </p>
-                        </div>
-                      </div>
-                    );
-                  })}
+                <div className="space-y-2">
+                  {visibleItems.map((item) => (
+                    <FeedRow
+                      key={item.id}
+                      item={item}
+                      profile={profiles[item.pubkey]}
+                      expanded={expandedId === item.id}
+                      failedReason={failedBroadcastMap[item.id]}
+                      onToggle={() =>
+                        setExpandedId((prev) =>
+                          prev === item.id ? null : item.id,
+                        )
+                      }
+                      onCopy={(label, value) => {
+                        void copyValue(label, value);
+                      }}
+                      onRetry={() => retryDraftFromItem(item)}
+                    />
+                  ))}
                 </div>
               )}
-            </div>
+
+              {showLoadMore && (
+                <button
+                  onClick={() => setVisibleCount((prev) => prev + 30)}
+                  className="mt-3 w-full rounded-lg border border-white/15 bg-black/30 py-2 text-xs text-gray-300 hover:bg-white/5"
+                >
+                  Load more
+                </button>
+              )}
+            </section>
           </>
         )}
       </div>
+
+      <IdentityGateModal
+        isOpen={gates.identityOpen}
+        onClose={gates.closeIdentity}
+      />
+      <WalletGateModal isOpen={gates.walletOpen} onClose={gates.closeWallet} />
     </div>
   );
 }

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { Trophy, Map, Zap, X, Loader2, Shield, Target } from "lucide-react";
-import { useSession } from "@/contexts/NostrSessionContext";
+import { useIdentity } from "@/context/identity-context";
 import { cn } from "@/lib/utils";
 import { Share2 } from "lucide-react";
 
@@ -10,13 +10,14 @@ interface EarnDrawerProps {
 }
 
 export default function EarnDrawer({ isOpen, onClose }: EarnDrawerProps) {
-  const { ndk, session } = useSession();
+  const { ndk, session } = useIdentity();
   const [checkInCount, setCheckInCount] = useState(0);
   const [loading, setLoading] = useState(false);
 
   // Fetch real user stats from Nostr when drawer opens
   useEffect(() => {
     if (isOpen && session.type !== "anon" && session.pubkey && ndk) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- toggles loading for async fetch lifecycle
       setLoading(true);
       // Query: "How many kind 1 events has this user published with #satsrover tag?"
       ndk
@@ -164,7 +165,14 @@ export default function EarnDrawer({ isOpen, onClose }: EarnDrawerProps) {
   );
 }
 
-function MissionRow({ icon: Icon, title, desc, completed }: any) {
+interface MissionRowProps {
+  icon: React.ComponentType<{ className?: string }>;
+  title: string;
+  desc: string;
+  completed: boolean;
+}
+
+function MissionRow({ icon: Icon, title, desc, completed }: MissionRowProps) {
   return (
     <div
       className={cn(

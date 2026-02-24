@@ -1,21 +1,17 @@
-import React, { useEffect, useState } from "react";
-import { Activity, Radio, X, Loader2, Zap, MapPin } from "lucide-react";
-import { useSession } from "@/contexts/NostrSessionContext";
+import React, { useEffect, useRef, useState } from "react";
+import { Radio, X, Loader2, Zap, MapPin } from "lucide-react";
+import { useIdentity } from "@/context/identity-context";
 import { NDKUserProfile } from "@nostr-dev-kit/ndk";
+import { useSignalFeed } from "@/domain/signals/client";
+import type { SignalFeedItemUI } from "@/domain/signals/types";
 
 interface ActivityDrawerProps {
   isOpen: boolean;
+  bbox: string | null;
   onClose: () => void;
 }
 
-interface SignalEvent {
-  id: string;
-  pubkey: string;
-  content: string;
-  created_at: number;
-  profile?: NDKUserProfile;
-  location?: string;
-}
+type ProfileMap = Record<string, NDKUserProfile>;
 
 // Helper for dynamic date
 function getNextFriday() {
@@ -29,61 +25,41 @@ function getNextFriday() {
 
 export default function ActivityDrawer({
   isOpen,
+  bbox,
   onClose,
 }: ActivityDrawerProps) {
-  const { ndk } = useSession();
-  const [signals, setSignals] = useState<SignalEvent[]>([]);
-  const [loading, setLoading] = useState(false);
+  const { ndk } = useIdentity();
+  const [profiles, setProfiles] = useState<ProfileMap>({});
+  const hydratedPubkeysRef = useRef<Set<string>>(new Set());
+  const globalFeed = useSignalFeed({
+    mode: "global",
+    bbox,
+    limit: 50,
+    enabled: isOpen,
+  });
 
   useEffect(() => {
-    if (isOpen && ndk) {
-      setLoading(true);
-      ndk
-        .fetchEvents({
-          kinds: [1],
-          "#t": ["satsrover"],
-          limit: 50,
-        })
-        .then(async (events) => {
-          const sorted = Array.from(events).sort(
-            (a, b) => b.created_at! - a.created_at!
-          );
+    const run = async () => {
+      if (!isOpen || !ndk || globalFeed.items.length === 0) return;
+      const uniquePubkeys = Array.from(new Set(globalFeed.items.map((s) => s.pubkey)));
+      const nextProfiles: ProfileMap = {};
+      await Promise.all(
+        uniquePubkeys.map(async (pk) => {
+          if (hydratedPubkeysRef.current.has(pk)) return;
+          const user = ndk.getUser({ pubkey: pk });
+          const profile = await user.fetchProfile();
+          hydratedPubkeysRef.current.add(pk);
+          if (profile) nextProfiles[pk] = profile;
+        }),
+      );
+      if (Object.keys(nextProfiles).length > 0) {
+        setProfiles((prev) => ({ ...prev, ...nextProfiles }));
+      }
+    };
+    void run();
+  }, [globalFeed.items, isOpen, ndk]);
 
-          const enriched = await Promise.all(
-            sorted.slice(0, 20).map(async (e) => {
-              const user = ndk.getUser({ pubkey: e.pubkey });
-              // Safe profile fetch
-              const profileData = await user.fetchProfile();
-              const profile = profileData || undefined;
-
-              // ✅ ROBUST PARSING
-              let location = "Unknown Location";
-              const cityTag = e.tags.find((t) => t[0] === "city")?.[1];
-              const countryTag = e.tags.find((t) => t[0] === "country")?.[1];
-
-              if (cityTag) {
-                location = countryTag ? `${cityTag}, ${countryTag}` : cityTag;
-              } else {
-                const match = e.content.match(/Checking in at (.*?) ⚡/);
-                if (match) location = match[1];
-              }
-
-              return {
-                id: e.id,
-                pubkey: e.pubkey,
-                content: e.content,
-                created_at: e.created_at!,
-                profile,
-                location,
-              };
-            })
-          );
-
-          setSignals(enriched);
-          setLoading(false);
-        });
-    }
-  }, [isOpen, ndk]);
+  const feedItems = globalFeed.items.slice(0, 20);
 
   if (!isOpen) return null;
 
@@ -133,45 +109,53 @@ export default function ActivityDrawer({
 
         {/* Feed List */}
         <div className="flex-1 overflow-y-auto min-h-0 space-y-4 pr-1 scrollbar-hide">
-          {loading ? (
+          {globalFeed.loading ? (
             <div className="flex flex-col items-center justify-center h-40 gap-3 text-bitcoin">
               <Loader2 className="w-6 h-6 animate-spin" />
               <span className="text-xs uppercase tracking-widest">
                 Scanning Frequencies...
               </span>
             </div>
+          ) : !bbox ? (
+            <div className="text-xs text-gray-500">Move the map to load global feed.</div>
+          ) : feedItems.length === 0 ? (
+            <div className="text-xs text-gray-500">No indexed signals for current map sector.</div>
           ) : (
-            signals.map((signal) => (
+            feedItems.map((signal: SignalFeedItemUI) => {
+              const profile = profiles[signal.pubkey];
+              const placeLabel =
+                globalFeed.places[signal.placeId]?.name || "Unknown Location";
+              return (
               <div
                 key={signal.id}
                 className="relative pl-4 border-l border-white/10 pb-4 last:border-0 last:pb-0"
               >
                 <div className="absolute -left-1.25 top-0 w-2.5 h-2.5 rounded-full bg-[#121212] border border-white/30" />
                 <div className="flex items-start gap-3">
-                  {signal.profile?.image ? (
+                  {profile?.image ? (
                     <img
-                      src={signal.profile.image}
+                      src={profile.image}
                       className="w-8 h-8 rounded bg-gray-800 object-cover border border-white/10"
                       alt=""
                     />
                   ) : (
                     <div className="w-8 h-8 rounded bg-white/5 flex items-center justify-center text-[10px] font-bold border border-white/10">
-                      {signal.pubkey.slice(0, 2)}
+                      {signal.pubkey.slice(0, 2).toUpperCase()}
                     </div>
                   )}
                   <div className="flex-1 min-w-0">
                     <div className="flex justify-between items-baseline">
                       <p className="text-xs font-bold text-gray-300 truncate">
-                        {signal.profile?.name || "Anon Scout"}
+                        {profile?.name || profile?.displayName || "Anon Scout"}
                       </p>
                       <span className="text-[9px] text-gray-600">
-                        {timeAgo(signal.created_at)}
+                        {timeAgo(Math.floor(signal.createdAtMs / 1000))}
                       </span>
                     </div>
                     <div className="flex items-center gap-1 text-bitcoin text-[10px] mt-0.5 mb-1 truncate">
                       <MapPin className="w-3 h-3" />
                       <span className="uppercase tracking-wide">
-                        {signal.location}
+                        {placeLabel}
                       </span>
                     </div>
                     <p className="text-xs text-gray-500 line-clamp-2 leading-relaxed">
@@ -183,7 +167,8 @@ export default function ActivityDrawer({
                   </div>
                 </div>
               </div>
-            ))
+            );
+            })
           )}
         </div>
       </div>

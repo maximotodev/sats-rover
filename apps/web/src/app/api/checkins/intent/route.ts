@@ -1,3 +1,4 @@
+// apps/web/src/app/api/checkins/intent/route.ts
 import { NextResponse } from "next/server";
 
 const ENGINE_URL = process.env.ROVER_ENGINE_URL || "http://localhost:8000";
@@ -36,11 +37,11 @@ export async function POST(request: Request) {
     );
 
     const data = await resp.json().catch(() => null);
-    return NextResponse.json(data ?? { message: "Intent request failed" }, { status: resp.status });
-  } catch (e: any) {
-    return NextResponse.json(
-      { error: e?.message || "Intent request failed" },
-      { status: 500 },
-    );
+    return NextResponse.json(data ?? { message: "Intent request failed" }, {
+      status: resp.status,
+    });
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : "Intent request failed";
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
