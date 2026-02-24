@@ -4,7 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "npx tsx src/index.ts"
+    "dev": "tsx src/index.ts",
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "tsc -p tsconfig.json"
   },
   "dependencies": {
     "nostr-tools": "^2.7.0",
