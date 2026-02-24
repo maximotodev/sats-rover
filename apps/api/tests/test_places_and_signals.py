@@ -1,9 +1,11 @@
 import unittest
+from unittest.mock import AsyncMock, patch
 
 from pydantic import ValidationError
 
 from app.schemas.signal import CheckinConfirmIn, PlaceFeedOut
 from app.services.places_service import parse_bbox
+from app.services.signals_service import confirm_checkin, get_checkin_status
 
 
 class PlacesAndSignalsTests(unittest.TestCase):
@@ -33,6 +35,74 @@ class PlacesAndSignalsTests(unittest.TestCase):
     def test_checkin_confirm_validates_hex(self):
         with self.assertRaises(ValidationError):
             CheckinConfirmIn(event_id="not-hex", place_id="btcmap:abc", pubkey="f" * 64)
+
+
+class _MappingsResult:
+    def __init__(self, row):
+        self._row = row
+
+    def mappings(self):
+        return self
+
+    def first(self):
+        return self._row
+
+
+class CheckinsIdempotencyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_confirm_duplicate_same_day_returns_ok_existing_event_id(self):
+        db = AsyncMock()
+        db.execute = AsyncMock(return_value=_MappingsResult({"event_id": "a" * 64}))
+        payload = CheckinConfirmIn(
+            event_id="b" * 64,
+            place_id="btcmap:abc",
+            pubkey="c" * 64,
+            payment_evidence=None,
+        )
+
+        with patch("app.services.signals_service.redis_client.getdel", new=AsyncMock(return_value='{"place_id":"btcmap:abc"}')), patch(
+            "app.services.signals_service.redis_client.setex",
+            new=AsyncMock(return_value=True),
+        ):
+            out = await confirm_checkin(db=db, payload=payload, intent_token="sr_ci_demo")
+
+        self.assertEqual(out.status, "ok")
+        self.assertEqual(out.reason_code, "duplicate_checkin_same_day")
+        self.assertEqual(out.event_id, "a" * 64)
+
+    async def test_status_returns_pending_then_not_found_after_window(self):
+        db = AsyncMock()
+        db.execute = AsyncMock(return_value=_MappingsResult(None))
+
+        probe_value: bytes | None = None
+
+        async def _redis_get(key: str):
+            nonlocal probe_value
+            if key.startswith("checkin:pending:"):
+                return None
+            if key.startswith("checkin:meta:"):
+                return None
+            if key.startswith("checkin:probe:"):
+                return probe_value
+            return None
+
+        async def _redis_setex(key: str, ttl: int, value: str):
+            nonlocal probe_value
+            if key.startswith("checkin:probe:"):
+                probe_value = value.encode("utf-8")
+            return True
+
+        get_mock = AsyncMock(side_effect=_redis_get)
+        with patch("app.services.signals_service.redis_client.get", new=get_mock), patch(
+            "app.services.signals_service.redis_client.setex",
+            new=AsyncMock(side_effect=_redis_setex),
+        ), patch("app.services.signals_service.time.time", side_effect=[100, 130]):
+            pending = await get_checkin_status(db=db, checkin_id="d" * 64)
+            not_found = await get_checkin_status(db=db, checkin_id="d" * 64)
+
+        self.assertEqual(pending.status, "pending")
+        self.assertEqual(pending.reason_code, "indexing_delay")
+        self.assertEqual(not_found.status, "not_found")
+        self.assertEqual(not_found.reason_code, "unknown_checkin")
 
 
 if __name__ == "__main__":

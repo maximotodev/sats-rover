@@ -6,9 +6,12 @@ export async function GET(request: Request) {
   try {
     const url = new URL(request.url);
     const checkinId = url.searchParams.get("checkin_id") || "";
+    const pubkey = url.searchParams.get("pubkey") || "";
+    const placeId = url.searchParams.get("place_id") || "";
     if (!checkinId) {
       return NextResponse.json(
         {
+          status: "failed",
           reason_code: "missing_checkin_id",
           message: "Missing checkin_id",
         },
@@ -16,8 +19,13 @@ export async function GET(request: Request) {
       );
     }
 
+    const upstreamUrl = new URL(`${ENGINE_URL}/v1/checkins/status`);
+    upstreamUrl.searchParams.set("checkin_id", checkinId);
+    if (pubkey) upstreamUrl.searchParams.set("pubkey", pubkey);
+    if (placeId) upstreamUrl.searchParams.set("place_id", placeId);
+
     const resp = await fetch(
-      `${ENGINE_URL}/v1/checkins/status?checkin_id=${encodeURIComponent(checkinId)}`,
+      upstreamUrl.toString(),
       {
         method: "GET",
         headers: { accept: "application/json" },
@@ -25,15 +33,64 @@ export async function GET(request: Request) {
     );
 
     const data = await resp.json().catch(() => null);
+    if (resp.status === 404) {
+      const reasonCode =
+        data && typeof data.reason_code === "string"
+          ? data.reason_code
+          : "indexing_delay";
+      const mappedStatus =
+        reasonCode === "unknown_checkin" || reasonCode === "not_found"
+          ? "not_found"
+          : "pending";
+      return NextResponse.json(
+        {
+          status: mappedStatus,
+          reason_code: reasonCode,
+          event_id: checkinId,
+        },
+        { status: 200 },
+      );
+    }
+
+    if (!resp.ok) {
+      return NextResponse.json(
+        {
+          status: "pending",
+          reason_code: "indexing_delay",
+          event_id: checkinId,
+        },
+        { status: 200 },
+      );
+    }
+
+    const normalized =
+      data && typeof data.status === "string"
+        ? {
+            status: data.status,
+            reason_code:
+              typeof data.reason_code === "string" ? data.reason_code : null,
+            event_id:
+              typeof data.event_id === "string" ? data.event_id : checkinId,
+          }
+        : {
+            status: "pending",
+            reason_code: "indexing_delay",
+            event_id: checkinId,
+          };
+
     return NextResponse.json(
-      data ?? { message: "Status request failed" },
-      { status: resp.status },
+      normalized,
+      { status: 200 },
     );
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : "Status request failed";
     return NextResponse.json(
-      { error: message },
-      { status: 500 },
+      {
+        status: "pending",
+        reason_code: "indexing_delay",
+        message,
+      },
+      { status: 200 },
     );
   }
 }

@@ -4,8 +4,19 @@ from fastapi import APIRouter, Depends, Header, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
-from app.schemas.signal import CheckinConfirmIn, CheckinConfirmOut, CheckinIntentOut, PlaceFeedOut
-from app.services.signals_service import confirm_checkin, create_checkin_intent, get_place_feed
+from app.schemas.signal import (
+    CheckinConfirmIn,
+    CheckinConfirmOut,
+    CheckinIntentOut,
+    CheckinStatusOut,
+    PlaceFeedOut,
+)
+from app.services.signals_service import (
+    confirm_checkin,
+    create_checkin_intent,
+    get_checkin_status,
+    get_place_feed,
+)
 
 router = APIRouter(prefix="/v1", tags=["signals"])
 
@@ -29,5 +40,21 @@ async def checkin_intent(place_id: str, request: Request):
 async def checkin_confirm(
     payload: CheckinConfirmIn,
     x_checkin_intent: str | None = Header(default=None, alias="X-Checkin-Intent"),
+    db: AsyncSession = Depends(get_db),
 ):
-    return await confirm_checkin(payload, x_checkin_intent)
+    return await confirm_checkin(db=db, payload=payload, intent_token=x_checkin_intent)
+
+
+@router.get("/checkins/status", response_model=CheckinStatusOut)
+async def checkin_status(
+    checkin_id: str = Query(..., min_length=1),
+    pubkey: str | None = Query(default=None),
+    place_id: str | None = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    return await get_checkin_status(
+        db=db,
+        checkin_id=checkin_id,
+        pubkey=pubkey,
+        place_id=place_id,
+    )
