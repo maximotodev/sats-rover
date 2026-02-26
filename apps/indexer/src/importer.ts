@@ -41,17 +41,33 @@ function rememberUniqueKey(keys: Set<string>, key: string): boolean {
   return true;
 }
 
-function canonicalizePlaceId(
+async function canonicalizePlaceId(
+  pool: Pool,
   raw: string,
-): { canonical: string; didNormalize: boolean } | null {
+): Promise<{ canonical: string; didNormalize: boolean } | null> {
   // Keep canonical tagged IDs exactly as they came in.
   if (raw.includes(":") && CANONICAL_PLACE_ID.test(raw)) {
     return { canonical: raw, didNormalize: false };
   }
 
-  // Legacy format: bare digits mapped to btcmap node IDs.
+  // Legacy format: bare digits resolved against known places only.
   if (LEGACY_DIGITS_ONLY_PLACE_ID.test(raw)) {
-    return { canonical: `btcmap:node:${raw}`, didNormalize: true };
+    const candidates = [`btcmap:node:${raw}`, `osm:node:${raw}`];
+    const resolved = await pool.query<{ id: string }>(
+      `
+        SELECT id
+        FROM places
+        WHERE id = ANY($1::text[])
+        ORDER BY array_position($1::text[], id)
+        LIMIT 1
+      `,
+      [candidates],
+    );
+    const canonical = resolved.rows[0]?.id;
+    if (typeof canonical === "string" && CANONICAL_PLACE_ID.test(canonical)) {
+      return { canonical, didNormalize: true };
+    }
+    return null;
   }
 
   return null;
@@ -70,7 +86,7 @@ export async function processSatsRoverEvent(pool: Pool, event: Event) {
 
     const rawPlaceId = event.tags.find((t: string[]) => t[0] === "place")?.[1];
     if (!rawPlaceId) return null;
-    const canonicalPlace = canonicalizePlaceId(rawPlaceId);
+    const canonicalPlace = await canonicalizePlaceId(pool, rawPlaceId);
     if (!canonicalPlace) {
       if (rememberUniqueKey(warnedNonCanonicalPlaceIds, rawPlaceId)) {
         log("warn", "non_canonical_place_id", {
