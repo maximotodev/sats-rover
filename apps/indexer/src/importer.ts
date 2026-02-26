@@ -62,7 +62,7 @@ export async function processSatsRoverEvent(pool: Pool, event: Event) {
       inserted_signal AS (
         INSERT INTO signals (event_id, pubkey, place_id, status, created_at, signal_date)
         SELECT $1, $2, id, $4, to_timestamp($5), $6 FROM target_place
-        ON CONFLICT (event_id) DO NOTHING
+        ON CONFLICT DO NOTHING
         RETURNING place_id
       )
       UPDATE places
@@ -82,11 +82,33 @@ export async function processSatsRoverEvent(pool: Pool, event: Event) {
     ]);
 
     if (res.rowCount && res.rowCount > 0) {
+      await pool.query(
+        `
+          UPDATE checkin_submissions
+          SET status = 'confirmed', confirmed_at = now()
+          WHERE event_id = $1 AND status = 'pending'
+        `,
+        [event.id],
+      );
       return { placeId, status };
     }
 
+    await pool.query(
+      `
+        UPDATE checkin_submissions
+        SET status = 'confirmed', confirmed_at = now()
+        WHERE event_id = $1 AND status = 'pending'
+      `,
+      [event.id],
+    );
     return null;
   } catch (err: any) {
+    if (err.code === "23505") {
+      log("warn", "signal_duplicate_ignored", {
+        eventId: event?.id,
+      });
+      return null;
+    }
     if (err.code === "23503") {
       log("warn", "signal_foreign_key_rejected", {
         eventId: event?.id,
