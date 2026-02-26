@@ -6,9 +6,12 @@ const CANONICAL_PLACE_ID =
   /^(osm:(node|way|relation):\d+|btcmap:[a-zA-Z0-9:_-]+|manual:[a-zA-Z0-9_-]+|sr:[a-zA-Z0-9:_-]+)$/;
 const LEGACY_DIGITS_ONLY_PLACE_ID = /^\d+$/;
 const MAX_LOG_DEDUPE_KEYS = 5000;
+const MAX_RESOLUTION_CACHE_KEYS = 5000;
 
 const warnedNonCanonicalPlaceIds = new Set<string>();
 const loggedNormalizedPlaceIds = new Set<string>();
+const resolvedLegacyPlaceIds = new Map<string, string>();
+const unresolvedLegacyPlaceIds = new Set<string>();
 
 function log(
   level: "info" | "warn" | "error",
@@ -41,6 +44,20 @@ function rememberUniqueKey(keys: Set<string>, key: string): boolean {
   return true;
 }
 
+function rememberResolvedLegacyPlaceId(raw: string, canonical: string): void {
+  if (resolvedLegacyPlaceIds.size >= MAX_RESOLUTION_CACHE_KEYS) {
+    resolvedLegacyPlaceIds.clear();
+  }
+  resolvedLegacyPlaceIds.set(raw, canonical);
+}
+
+function rememberUnresolvedLegacyPlaceId(raw: string): void {
+  if (unresolvedLegacyPlaceIds.size >= MAX_RESOLUTION_CACHE_KEYS) {
+    unresolvedLegacyPlaceIds.clear();
+  }
+  unresolvedLegacyPlaceIds.add(raw);
+}
+
 async function canonicalizePlaceId(
   pool: Pool,
   raw: string,
@@ -52,6 +69,14 @@ async function canonicalizePlaceId(
 
   // Legacy format: bare digits resolved against known places only.
   if (LEGACY_DIGITS_ONLY_PLACE_ID.test(raw)) {
+    const cachedCanonical = resolvedLegacyPlaceIds.get(raw);
+    if (typeof cachedCanonical === "string") {
+      return { canonical: cachedCanonical, didNormalize: true };
+    }
+    if (unresolvedLegacyPlaceIds.has(raw)) {
+      return null;
+    }
+
     const candidates = [`btcmap:node:${raw}`, `osm:node:${raw}`];
     const resolved = await pool.query<{ id: string }>(
       `
@@ -65,8 +90,10 @@ async function canonicalizePlaceId(
     );
     const canonical = resolved.rows[0]?.id;
     if (typeof canonical === "string" && CANONICAL_PLACE_ID.test(canonical)) {
+      rememberResolvedLegacyPlaceId(raw, canonical);
       return { canonical, didNormalize: true };
     }
+    rememberUnresolvedLegacyPlaceId(raw);
     return null;
   }
 
