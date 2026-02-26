@@ -43,7 +43,15 @@ interface MerchantDrawerProps {
 
 type ProfileMap = Record<string, NDKUserProfile>;
 
-type CheckinStatusState = "idle" | "pending" | "ok" | "failed" | "not_found";
+type CheckinLifecycleState =
+  | "idle"
+  | "intent_created"
+  | "publishing"
+  | "confirming"
+  | "pending"
+  | "ok"
+  | "failed"
+  | "not_found";
 type ComposerStep = "broadcast" | "pay";
 
 type FailedBroadcastMap = Record<string, string>;
@@ -83,6 +91,19 @@ async function copyText(text: string): Promise<boolean> {
   }
 }
 
+const POLL_BACKOFF_MS = [400, 700, 1200, 1800, 2500] as const;
+const MAX_POLL_MS = 20_000;
+
+function jitterDelay(ms: number): number {
+  const jitter = Math.floor(Math.random() * 121) - 60;
+  return Math.max(300, Math.min(2500, ms + jitter));
+}
+
+function pollDelayForAttempt(attempt: number): number {
+  const idx = Math.min(attempt, POLL_BACKOFF_MS.length - 1);
+  return jitterDelay(POLL_BACKOFF_MS[idx]);
+}
+
 // AI placeholder: intentionally local-only. Future hook may call /api/ai/place-summary.
 function getFutureAiSummaryHint(placeId: string): string {
   return `AI summary for ${placeId} is not available yet.`;
@@ -117,7 +138,6 @@ function FeedRow({
   failedReason,
   onToggle,
   onCopy,
-  onRetry,
 }: {
   item: SignalFeedItemUI;
   profile?: NDKUserProfile;
@@ -125,7 +145,6 @@ function FeedRow({
   failedReason?: string;
   onToggle: () => void;
   onCopy: (label: string, value: string) => void;
-  onRetry: () => void;
 }) {
   const displayName =
     profile?.name || profile?.displayName || shortHex(item.pubkey, 10, 4);
@@ -134,11 +153,11 @@ function FeedRow({
   return (
     <article
       className={cn(
-        "rounded-xl border border-white/10 bg-white/5 px-3 py-3 transition",
+        "rounded-xl border bg-black/30 px-3 py-3 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.04)] transition",
         item.pending && !failedReason
-          ? "animate-pulse border-[#F7931A]/40"
+          ? "border-[#F7931A]/45 bg-[#F7931A]/5"
           : "",
-        failedReason ? "border-red-500/40" : "",
+        failedReason ? "border-red-500/40 bg-red-950/10" : "border-white/10",
       )}
     >
       <button
@@ -170,12 +189,17 @@ function FeedRow({
               </span>
             )}
           </div>
-          <p className="mt-1 text-[11px] text-gray-400">
+          <p className="mt-1 font-mono text-[11px] text-gray-500">
             {formatRelative(item.createdAtMs)}
           </p>
           <p className="mt-2 text-xs leading-relaxed text-gray-300">
             {content || <span className="text-gray-500">No note attached</span>}
           </p>
+          {item.pending && !failedReason && (
+            <div className="mt-2 rounded-md border border-[#F7931A]/35 bg-[#F7931A]/10 px-2 py-1 text-[11px] text-[#F7B267]">
+              Pending relay/indexer confirmation...
+            </div>
+          )}
           {failedReason && (
             <div className="mt-2 rounded-md border border-red-500/30 bg-red-900/20 px-2 py-1 text-[11px] text-red-300">
               Failed to broadcast: {failedReason}
@@ -213,14 +237,6 @@ function FeedRow({
           <div className="text-gray-500">
             created_at: {new Date(item.createdAtMs).toISOString()}
           </div>
-          {failedReason && (
-            <button
-              onClick={onRetry}
-              className="mt-1 rounded-md border border-red-500/40 bg-red-500/10 px-2 py-1 text-[10px] uppercase tracking-widest text-red-200 hover:bg-red-500/20"
-            >
-              Retry this check-in
-            </button>
-          )}
         </div>
       )}
     </article>
@@ -261,23 +277,29 @@ export default function MerchantDrawer({
   const [isPublishing, setIsPublishing] = useState(false);
   const [publishError, setPublishError] = useState<string | null>(null);
   const [checkinStatus, setCheckinStatus] =
-    useState<CheckinStatusState>("idle");
+    useState<CheckinLifecycleState>("idle");
   const [checkinReason, setCheckinReason] = useState<string | null>(null);
   const [activeCheckinId, setActiveCheckinId] = useState<string | null>(null);
   const [failedBroadcastMap, setFailedBroadcastMap] =
     useState<FailedBroadcastMap>({});
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [visibleCount, setVisibleCount] = useState(30);
+  const [copiedHint, setCopiedHint] = useState<string | null>(null);
 
   const pollRunIdRef = useRef(0);
+  const copiedHintTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     return () => {
       pollRunIdRef.current += 1;
+      if (copiedHintTimerRef.current !== null) {
+        window.clearTimeout(copiedHintTimerRef.current);
+      }
     };
   }, []);
 
   useEffect(() => {
+    pollRunIdRef.current += 1;
     if (!placeId) return;
     // eslint-disable-next-line react-hooks/set-state-in-effect -- reset local drawer state when selected merchant changes
     setComposerOpen(false);
@@ -291,6 +313,7 @@ export default function MerchantDrawer({
     setFailedBroadcastMap({});
     setExpandedId(null);
     setVisibleCount(30);
+    setCopiedHint(null);
   }, [placeId]);
 
   useEffect(() => {
@@ -362,9 +385,19 @@ export default function MerchantDrawer({
   const copyValue = async (label: string, value: string) => {
     if (!value) return;
     const ok = await copyText(value);
-    if (!ok) {
-      setPublishError(`Could not copy ${label}`);
+    if (copiedHintTimerRef.current !== null) {
+      window.clearTimeout(copiedHintTimerRef.current);
+      copiedHintTimerRef.current = null;
     }
+    if (ok) {
+      setCopiedHint(`Copied ${label}`);
+    } else {
+      setCopiedHint(`Copy failed: ${label}`);
+    }
+    copiedHintTimerRef.current = window.setTimeout(() => {
+      setCopiedHint(null);
+      copiedHintTimerRef.current = null;
+    }, 1200);
   };
 
   const handleShare = async () => {
@@ -401,13 +434,6 @@ export default function MerchantDrawer({
     setComposerOpen(true);
   };
 
-  const retryDraftFromItem = (item: SignalFeedItemUI) => {
-    setPaymentStatus(item.status);
-    setComment(item.content);
-    setComposerStep("broadcast");
-    setComposerOpen(true);
-  };
-
   const pollCheckinStatus = async (
     checkinId: string,
     pubkey: string,
@@ -415,8 +441,11 @@ export default function MerchantDrawer({
   ) => {
     const runId = ++pollRunIdRef.current;
     const startedAt = Date.now();
+    let attempt = 0;
+    setCheckinStatus("pending");
+    setCheckinReason("indexing_delay");
 
-    while (Date.now() - startedAt < 20000) {
+    while (Date.now() - startedAt < MAX_POLL_MS) {
       if (pollRunIdRef.current !== runId) return;
 
       try {
@@ -430,8 +459,7 @@ export default function MerchantDrawer({
           { method: "GET" },
         );
         const data = await resp.json().catch(() => null);
-        const status =
-          (data?.status as CheckinStatusState | undefined) || "failed";
+        const status = (data?.status as CheckinLifecycleState | undefined) || "failed";
         const reason = (data?.reason_code as string | null | undefined) ?? null;
 
         if (status === "ok" || status === "failed" || status === "not_found") {
@@ -441,11 +469,14 @@ export default function MerchantDrawer({
         }
 
         setCheckinStatus("pending");
+        setCheckinReason(reason ?? "indexing_delay");
       } catch {
         // Keep retrying until timeout.
       }
 
-      await new Promise((resolve) => setTimeout(resolve, 800));
+      const nextDelay = pollDelayForAttempt(attempt);
+      attempt += 1;
+      await new Promise((resolve) => setTimeout(resolve, nextDelay));
     }
 
     if (pollRunIdRef.current === runId) {
@@ -475,7 +506,7 @@ export default function MerchantDrawer({
 
     setIsPublishing(true);
     setPublishError(null);
-    setCheckinStatus("pending");
+    setCheckinStatus("intent_created");
     setCheckinReason(null);
 
     let intentToken = "";
@@ -510,6 +541,9 @@ export default function MerchantDrawer({
         typeof intentData?.intent_token === "string"
           ? intentData.intent_token
           : "";
+      if (intentToken) {
+        setCheckinStatus("publishing");
+      }
     } catch (error) {
       intentReasonCode =
         error instanceof Error && error.message
@@ -518,6 +552,7 @@ export default function MerchantDrawer({
       intentToken = "";
     }
 
+    setCheckinStatus("publishing");
     const publishResult = await transmitSignalFlow.run(async () =>
       publishSignal(merchant.id, paymentStatus, comment),
     );
@@ -578,6 +613,7 @@ export default function MerchantDrawer({
     }
 
     try {
+      setCheckinStatus("confirming");
       const confirmPayload = {
         event_id: eventId,
         place_id: merchant.id,
@@ -608,6 +644,8 @@ export default function MerchantDrawer({
       // Confirmation errors are reflected in poll status or follow-up refresh.
     }
 
+    setCheckinStatus("pending");
+    setCheckinReason("indexing_delay");
     await pollCheckinStatus(eventId, actorPubkey, merchant.id);
 
     setIsPublishing(false);
@@ -624,6 +662,11 @@ export default function MerchantDrawer({
   };
 
   const showLoadMore = visibleCount < feedItems.length;
+  const canRetryCheckin =
+    !isPublishing &&
+    (checkinStatus === "failed" ||
+      checkinStatus === "not_found" ||
+      Boolean(publishError));
 
   return (
     <div
@@ -632,26 +675,26 @@ export default function MerchantDrawer({
         merchant ? "translate-y-0" : "translate-y-full",
       )}
     >
-      <div className="h-px w-full bg-linear-to-r from-transparent via-[#F7931A] to-transparent shadow-[0_0_12px_#F7931A]" />
+      <div className="h-px w-full bg-linear-to-r from-transparent via-[#00FF41] to-transparent shadow-[0_0_12px_#00FF41]" />
 
-      <div className="max-h-[88vh] min-h-[52vh] overflow-y-auto border-t border-white/10 bg-linear-to-b from-[#0b0b0d]/95 to-[#050505] px-5 pb-10 pt-4 text-gray-200 shadow-2xl backdrop-blur-md">
-        <div className="mx-auto mb-5 h-1 w-12 rounded-full bg-white/20" />
+      <div className="max-h-[88vh] min-h-[52vh] overflow-y-auto border-t border-[#00FF41]/20 bg-[radial-gradient(circle_at_20%_-10%,rgba(0,255,65,0.14),transparent_40%),radial-gradient(circle_at_90%_-15%,rgba(247,147,26,0.16),transparent_38%),linear-gradient(to_bottom,#090b0c,#030304_72%)] px-4 pb-10 pt-4 text-gray-200 shadow-2xl backdrop-blur-md sm:px-5">
+        <div className="mx-auto mb-5 h-1 w-16 rounded-full bg-white/25" />
 
         {merchant && (
           <>
-            <header className="mb-5 rounded-2xl border border-white/10 bg-white/5 p-4">
+            <header className="mb-5 rounded-2xl border border-[#00FF41]/25 bg-black/45 p-4 shadow-[inset_0_0_30px_rgba(0,255,65,0.08),0_0_20px_rgba(0,0,0,0.45)]">
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
                   <h2 className="truncate text-xl font-semibold tracking-tight text-white">
                     {merchant.name || "Bitcoin Merchant"}
                   </h2>
                   <div className="mt-1 flex items-center gap-2 text-xs text-gray-400">
-                    <span className="inline-flex items-center gap-1 rounded-full border border-[#F7931A]/30 bg-[#F7931A]/10 px-2 py-0.5 text-[#F7931A]">
+                    <span className="inline-flex items-center gap-1 rounded-full border border-[#F7931A]/40 bg-[#F7931A]/12 px-2 py-0.5 text-[#F7B267]">
                       <MapPin className="h-3 w-3" />
                       {categoryLabel}
                     </span>
                     {hasLightning && (
-                      <span className="inline-flex items-center gap-1 rounded-full border border-[#F7931A]/30 px-2 py-0.5 text-[#F7931A]">
+                      <span className="inline-flex items-center gap-1 rounded-full border border-[#00FF41]/35 bg-[#00FF41]/10 px-2 py-0.5 text-[#00FF41]">
                         <Zap className="h-3 w-3" /> LN
                       </span>
                     )}
@@ -696,28 +739,28 @@ export default function MerchantDrawer({
                 </div>
               </div>
 
-              <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-5">
+              <div className="mt-4 grid grid-cols-2 gap-2">
                 <button
                   onClick={openComposer}
-                  className="inline-flex items-center justify-center gap-1 rounded-lg border border-[#F7931A]/40 bg-[#F7931A]/10 px-3 py-2 text-[11px] font-semibold text-[#F7931A] hover:bg-[#F7931A]/20"
+                  className="col-span-2 inline-flex min-h-[44px] items-center justify-center gap-2 rounded-xl border border-[#00FF41]/45 bg-[#00FF41]/90 px-3 py-2 text-[13px] font-semibold text-black shadow-[0_0_18px_rgba(0,255,65,0.35)] transition hover:bg-[#67ff92]"
                 >
-                  <Zap className="h-3.5 w-3.5" /> Check in
+                  <Zap className="h-4 w-4" /> Check in
                 </button>
                 <button
                   onClick={() => copyValue("event id", latestEventId)}
-                  className="inline-flex items-center justify-center gap-1 rounded-lg border border-white/15 bg-black/30 px-3 py-2 text-[11px] text-gray-300 hover:bg-white/5"
+                  className="inline-flex min-h-[42px] items-center justify-center gap-1 rounded-lg border border-white/15 bg-black/35 px-3 py-2 text-[11px] text-gray-300 hover:bg-white/5"
                 >
                   <Copy className="h-3.5 w-3.5" /> Copy event
                 </button>
                 <button
                   onClick={() => copyValue("place id", merchant.id)}
-                  className="inline-flex items-center justify-center gap-1 rounded-lg border border-white/15 bg-black/30 px-3 py-2 text-[11px] text-gray-300 hover:bg-white/5"
+                  className="inline-flex min-h-[42px] items-center justify-center gap-1 rounded-lg border border-white/15 bg-black/35 px-3 py-2 text-[11px] text-gray-300 hover:bg-white/5"
                 >
                   <Copy className="h-3.5 w-3.5" /> Copy place
                 </button>
                 <button
                   onClick={handleShare}
-                  className="inline-flex items-center justify-center gap-1 rounded-lg border border-white/15 bg-black/30 px-3 py-2 text-[11px] text-gray-300 hover:bg-white/5"
+                  className="inline-flex min-h-[42px] items-center justify-center gap-1 rounded-lg border border-white/15 bg-black/35 px-3 py-2 text-[11px] text-gray-300 hover:bg-white/5"
                 >
                   <Share2 className="h-3.5 w-3.5" /> Share
                 </button>
@@ -725,13 +768,13 @@ export default function MerchantDrawer({
                   href={`https://www.google.com/maps/dir/?api=1&destination=${merchant.lat},${merchant.lon}`}
                   target="_blank"
                   rel="noreferrer"
-                  className="inline-flex items-center justify-center gap-1 rounded-lg border border-white/15 bg-black/30 px-3 py-2 text-[11px] text-gray-300 hover:bg-white/5"
+                  className="inline-flex min-h-[42px] items-center justify-center gap-1 rounded-lg border border-white/15 bg-black/35 px-3 py-2 text-[11px] text-gray-300 hover:bg-white/5"
                 >
                   <Navigation className="h-3.5 w-3.5" /> Maps
                 </a>
               </div>
 
-              <div className="mt-3 grid grid-cols-2 gap-3 rounded-xl border border-white/10 bg-black/30 p-3 text-[11px] sm:grid-cols-4">
+              <div className="mt-3 grid grid-cols-2 gap-3 rounded-xl border border-white/10 bg-black/35 p-3 text-[11px] sm:grid-cols-4">
                 <div>
                   <p className="text-gray-500">Total signals</p>
                   <p className="mt-1 font-semibold text-gray-100">
@@ -769,7 +812,36 @@ export default function MerchantDrawer({
                   coming soon
                 </span>
               </div>
+
+              <div className="mt-3 rounded-lg border border-white/10 bg-black/40 px-3 py-2 font-mono text-[11px] text-gray-400">
+                <div className="flex items-center justify-between gap-2">
+                  <span>place_id</span>
+                  <button
+                    onClick={() => copyValue("place_id", merchant.id)}
+                    className="inline-flex items-center gap-1 text-gray-300 hover:text-white"
+                  >
+                    <Copy className="h-3 w-3" /> {shortHex(merchant.id, 12, 6)}
+                  </button>
+                </div>
+                {activeCheckinId && (
+                  <div className="mt-1 flex items-center justify-between gap-2">
+                    <span>event_id</span>
+                    <button
+                      onClick={() => copyValue("event_id", activeCheckinId)}
+                      className="inline-flex items-center gap-1 text-gray-300 hover:text-white"
+                    >
+                      <Copy className="h-3 w-3" /> {shortHex(activeCheckinId)}
+                    </button>
+                  </div>
+                )}
+              </div>
             </header>
+
+            {copiedHint && (
+              <div className="mb-3 inline-flex items-center gap-1 rounded-md border border-[#00FF41]/35 bg-[#00FF41]/10 px-2 py-1 text-[11px] font-medium text-[#9affbc]">
+                <CheckCircle2 className="h-3.5 w-3.5" /> {copiedHint}
+              </div>
+            )}
 
             {publishError && (
               <div className="mb-4 rounded-lg border border-red-500/30 bg-red-900/20 px-3 py-2 text-xs text-red-300">
@@ -777,43 +849,62 @@ export default function MerchantDrawer({
               </div>
             )}
 
-            {(checkinStatus === "pending" ||
-              checkinStatus === "failed" ||
-              checkinStatus === "not_found" ||
-              checkinStatus === "ok") && (
-              <div className="mb-4 rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-xs">
-                {checkinStatus === "pending" && (
-                  <div className="inline-flex items-center gap-2 text-[#F7931A]">
-                    <Loader2 className="h-4 w-4 animate-spin" /> Verifying
-                    check-in...
+            {(checkinStatus !== "idle" || publishError) && (
+              <div
+                className={cn(
+                  "mb-4 rounded-xl border px-3 py-3 text-xs shadow-[inset_0_0_18px_rgba(255,255,255,0.04)]",
+                  checkinStatus === "ok"
+                    ? "border-[#00FF41]/35 bg-[#00FF41]/10"
+                    : checkinStatus === "failed" || checkinStatus === "not_found"
+                      ? "border-red-500/35 bg-red-950/20"
+                      : "border-[#F7931A]/35 bg-[#F7931A]/10",
+                )}
+              >
+                {(checkinStatus === "intent_created" ||
+                  checkinStatus === "publishing" ||
+                  checkinStatus === "confirming" ||
+                  checkinStatus === "pending") && (
+                  <div className="inline-flex items-center gap-2 text-[#F7B267]">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    {checkinStatus === "intent_created" && "Preparing intent…"}
+                    {checkinStatus === "publishing" && "Publishing signal…"}
+                    {checkinStatus === "confirming" && "Confirming check-in…"}
+                    {checkinStatus === "pending" && "Indexing… pending"}
                   </div>
                 )}
                 {checkinStatus === "ok" && (
-                  <div className="inline-flex items-center gap-2 text-[#00FF41]">
-                    <CheckCircle2 className="h-4 w-4" /> Check-in confirmed.
+                  <div className="inline-flex items-center gap-2 text-[#8cffb0]">
+                    <CheckCircle2 className="h-4 w-4" /> Confirmed
                   </div>
                 )}
-                {(checkinStatus === "failed" ||
-                  checkinStatus === "not_found") && (
+                {(checkinStatus === "failed" || checkinStatus === "not_found") && (
                   <div className="inline-flex items-center gap-2 text-red-300">
                     <AlertCircle className="h-4 w-4" />
-                    Verification{" "}
-                    {checkinStatus === "not_found" ? "not found" : "failed"}
+                    {checkinStatus === "not_found" ? "Not found yet" : "Verification failed"}
                     {checkinReason ? ` (${checkinReason})` : ""}
                   </div>
                 )}
                 {activeCheckinId && (
-                  <div className="mt-1 text-[11px] text-gray-500">
+                  <div className="mt-1 font-mono text-[11px] text-gray-300/90">
                     event {shortHex(activeCheckinId)}
                   </div>
+                )}
+                {canRetryCheckin && (
+                  <button
+                    onClick={handleSubmitReport}
+                    disabled={isPublishing || checkinStatus === "pending"}
+                    className="mt-2 inline-flex min-h-[38px] items-center gap-2 rounded-lg border border-red-400/40 bg-red-500/10 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-red-200 hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    <AlertCircle className="h-3.5 w-3.5" /> Retry check-in
+                  </button>
                 )}
               </div>
             )}
 
             {composerOpen && (
-              <section className="mb-4 rounded-xl border border-[#F7931A]/30 bg-[#F7931A]/5 p-4">
+              <section className="mb-4 rounded-xl border border-[#F7931A]/35 bg-black/35 p-4 shadow-[inset_0_0_18px_rgba(247,147,26,0.1)]">
                 <div className="mb-3 flex items-center justify-between">
-                  <h3 className="text-xs font-semibold uppercase tracking-widest text-[#F7931A]">
+                  <h3 className="text-xs font-semibold uppercase tracking-widest text-[#F7B267]">
                     Check-in Composer
                   </h3>
                   <button
@@ -890,14 +981,14 @@ export default function MerchantDrawer({
                         <button
                           onClick={handleSubmitReport}
                           disabled={isPublishing || checkinStatus === "pending"}
-                          className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-[#F7931A] px-3 py-2 text-xs font-semibold uppercase tracking-widest text-black disabled:cursor-not-allowed disabled:opacity-60"
+                          className="inline-flex w-full min-h-[46px] items-center justify-center gap-2 rounded-xl border border-[#00FF41]/40 bg-[#00FF41] px-3 py-2 text-sm font-semibold uppercase tracking-[0.16em] text-black shadow-[0_0_22px_rgba(0,255,65,0.35)] transition hover:bg-[#6cff96] disabled:cursor-not-allowed disabled:opacity-60"
                         >
                           {isPublishing ? (
                             <Loader2 className="h-4 w-4 animate-spin" />
                           ) : (
                             <Zap className="h-4 w-4" />
                           )}
-                          {isPublishing ? "Broadcasting" : "Broadcast Check-in"}
+                          {isPublishing ? "Checking in..." : "Check in"}
                         </button>
                       </>
                     ) : (
@@ -949,7 +1040,7 @@ export default function MerchantDrawer({
                   No signals detected in this sector.
                 </div>
               ) : (
-                <div className="space-y-2">
+                <div className="space-y-3">
                   {visibleItems.map((item) => (
                     <FeedRow
                       key={item.id}
@@ -965,7 +1056,6 @@ export default function MerchantDrawer({
                       onCopy={(label, value) => {
                         void copyValue(label, value);
                       }}
-                      onRetry={() => retryDraftFromItem(item)}
                     />
                   ))}
                 </div>
