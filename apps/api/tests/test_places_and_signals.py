@@ -163,6 +163,45 @@ class CheckinsIdempotencyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status.reason_code, "indexing_delay")
         self.assertEqual(status.event_id, "d" * 64)
 
+    async def test_confirm_returns_ok_when_signal_already_ingested(self):
+        payload = CheckinConfirmIn(
+            event_id="1" * 64,
+            place_id="btcmap:abc",
+            pubkey="2" * 64,
+            payment_evidence=None,
+        )
+        calls = {"inserted": False, "updated": False}
+
+        async def _db_execute(stmt, params):
+            sql = str(stmt)
+            if "FROM signals" in sql and "pubkey =" in sql:
+                return _MappingsResult(None)
+            if "INSERT INTO checkin_submissions" in sql:
+                calls["inserted"] = True
+                return _MappingsResult(None)
+            if "SELECT event_id FROM signals WHERE event_id = :event_id" in sql:
+                return _MappingsResult({"event_id": payload.event_id})
+            if "UPDATE checkin_submissions" in sql:
+                calls["updated"] = True
+                self.assertEqual(params.get("event_id"), payload.event_id)
+                return _MappingsResult(None)
+            return _MappingsResult(None)
+
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=_db_execute)
+
+        with patch("app.services.signals_service.redis_client.getdel", new=AsyncMock(return_value='{"place_id":"btcmap:abc"}')), patch(
+            "app.services.signals_service.redis_client.setex",
+            new=AsyncMock(return_value=True),
+        ):
+            out = await confirm_checkin(db=db, payload=payload, intent_token="sr_ci_demo")
+
+        self.assertTrue(calls["inserted"])
+        self.assertTrue(calls["updated"])
+        self.assertEqual(out.status, "ok")
+        self.assertEqual(out.reason_code, "confirmed")
+        self.assertEqual(out.event_id, payload.event_id)
+
 
 if __name__ == "__main__":
     unittest.main()

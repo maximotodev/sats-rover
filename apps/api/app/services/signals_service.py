@@ -243,6 +243,32 @@ async def confirm_checkin(
         },
     )
 
+    ingested_row = (
+        await db.execute(
+            text("SELECT event_id FROM signals WHERE event_id = :event_id LIMIT 1"),
+            {"event_id": payload.event_id},
+        )
+    ).mappings().first()
+    if ingested_row and isinstance(ingested_row.get("event_id"), str):
+        await db.execute(
+            text(
+                """
+                UPDATE checkin_submissions
+                SET status = 'confirmed',
+                    confirmed_at = now(),
+                    reason_code = 'confirmed'
+                WHERE event_id = :event_id
+                  AND status = 'pending'
+                """
+            ),
+            {"event_id": payload.event_id},
+        )
+        return CheckinConfirmOut(
+            status="ok",
+            reason_code="confirmed",
+            event_id=ingested_row["event_id"],
+        )
+
     pending_key = f"checkin:pending:{payload.event_id}"
     pending_record = {
         "event_id": payload.event_id,
