@@ -454,12 +454,12 @@ export default function MerchantDrawer({
           pubkey,
           place_id: placeId,
         });
-        const resp = await fetch(
-          `/api/checkins/status?${params.toString()}`,
-          { method: "GET" },
-        );
+        const resp = await fetch(`/api/checkins/status?${params.toString()}`, {
+          method: "GET",
+        });
         const data = await resp.json().catch(() => null);
-        const status = (data?.status as CheckinLifecycleState | undefined) || "failed";
+        const status =
+          (data?.status as CheckinLifecycleState | undefined) || "failed";
         const reason = (data?.reason_code as string | null | undefined) ?? null;
 
         if (status === "ok" || status === "failed" || status === "not_found") {
@@ -742,25 +742,25 @@ export default function MerchantDrawer({
               <div className="mt-4 grid grid-cols-2 gap-2">
                 <button
                   onClick={openComposer}
-                  className="col-span-2 inline-flex min-h-[44px] items-center justify-center gap-2 rounded-xl border border-[#00FF41]/45 bg-[#00FF41]/90 px-3 py-2 text-[13px] font-semibold text-black shadow-[0_0_18px_rgba(0,255,65,0.35)] transition hover:bg-[#67ff92]"
+                  className="col-span-2 inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-[#00FF41]/45 bg-[#00FF41]/90 px-3 py-2 text-[13px] font-semibold text-black shadow-[0_0_18px_rgba(0,255,65,0.35)] transition hover:bg-[#67ff92]"
                 >
                   <Zap className="h-4 w-4" /> Check in
                 </button>
                 <button
                   onClick={() => copyValue("event id", latestEventId)}
-                  className="inline-flex min-h-[42px] items-center justify-center gap-1 rounded-lg border border-white/15 bg-black/35 px-3 py-2 text-[11px] text-gray-300 hover:bg-white/5"
+                  className="inline-flex min-h-10.5 items-center justify-center gap-1 rounded-lg border border-white/15 bg-black/35 px-3 py-2 text-[11px] text-gray-300 hover:bg-white/5"
                 >
                   <Copy className="h-3.5 w-3.5" /> Copy event
                 </button>
                 <button
                   onClick={() => copyValue("place id", merchant.id)}
-                  className="inline-flex min-h-[42px] items-center justify-center gap-1 rounded-lg border border-white/15 bg-black/35 px-3 py-2 text-[11px] text-gray-300 hover:bg-white/5"
+                  className="inline-flex min-h-10.5 items-center justify-center gap-1 rounded-lg border border-white/15 bg-black/35 px-3 py-2 text-[11px] text-gray-300 hover:bg-white/5"
                 >
                   <Copy className="h-3.5 w-3.5" /> Copy place
                 </button>
                 <button
                   onClick={handleShare}
-                  className="inline-flex min-h-[42px] items-center justify-center gap-1 rounded-lg border border-white/15 bg-black/35 px-3 py-2 text-[11px] text-gray-300 hover:bg-white/5"
+                  className="inline-flex min-h-10.5 items-center justify-center gap-1 rounded-lg border border-white/15 bg-black/35 px-3 py-2 text-[11px] text-gray-300 hover:bg-white/5"
                 >
                   <Share2 className="h-3.5 w-3.5" /> Share
                 </button>
@@ -768,7 +768,7 @@ export default function MerchantDrawer({
                   href={`https://www.google.com/maps/dir/?api=1&destination=${merchant.lat},${merchant.lon}`}
                   target="_blank"
                   rel="noreferrer"
-                  className="inline-flex min-h-[42px] items-center justify-center gap-1 rounded-lg border border-white/15 bg-black/35 px-3 py-2 text-[11px] text-gray-300 hover:bg-white/5"
+                  className="inline-flex min-h-10.5 items-center justify-center gap-1 rounded-lg border border-white/15 bg-black/35 px-3 py-2 text-[11px] text-gray-300 hover:bg-white/5"
                 >
                   <Navigation className="h-3.5 w-3.5" /> Maps
                 </a>
@@ -855,7 +855,8 @@ export default function MerchantDrawer({
                   "mb-4 rounded-xl border px-3 py-3 text-xs shadow-[inset_0_0_18px_rgba(255,255,255,0.04)]",
                   checkinStatus === "ok"
                     ? "border-[#00FF41]/35 bg-[#00FF41]/10"
-                    : checkinStatus === "failed" || checkinStatus === "not_found"
+                    : checkinStatus === "failed" ||
+                        checkinStatus === "not_found"
                       ? "border-red-500/35 bg-red-950/20"
                       : "border-[#F7931A]/35 bg-[#F7931A]/10",
                 )}
@@ -877,10 +878,13 @@ export default function MerchantDrawer({
                     <CheckCircle2 className="h-4 w-4" /> Confirmed
                   </div>
                 )}
-                {(checkinStatus === "failed" || checkinStatus === "not_found") && (
+                {(checkinStatus === "failed" ||
+                  checkinStatus === "not_found") && (
                   <div className="inline-flex items-center gap-2 text-red-300">
                     <AlertCircle className="h-4 w-4" />
-                    {checkinStatus === "not_found" ? "Not found yet" : "Verification failed"}
+                    {checkinStatus === "not_found"
+                      ? "Not found yet"
+                      : "Verification failed"}
                     {checkinReason ? ` (${checkinReason})` : ""}
                   </div>
                 )}
@@ -893,7 +897,7 @@ export default function MerchantDrawer({
                   <button
                     onClick={handleSubmitReport}
                     disabled={isPublishing || checkinStatus === "pending"}
-                    className="mt-2 inline-flex min-h-[38px] items-center gap-2 rounded-lg border border-red-400/40 bg-red-500/10 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-red-200 hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-60"
+                    className="mt-2 inline-flex min-h-9.5 items-center gap-2 rounded-lg border border-red-400/40 bg-red-500/10 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-red-200 hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     <AlertCircle className="h-3.5 w-3.5" /> Retry check-in
                   </button>
@@ -981,7 +985,7 @@ export default function MerchantDrawer({
                         <button
                           onClick={handleSubmitReport}
                           disabled={isPublishing || checkinStatus === "pending"}
-                          className="inline-flex w-full min-h-[46px] items-center justify-center gap-2 rounded-xl border border-[#00FF41]/40 bg-[#00FF41] px-3 py-2 text-sm font-semibold uppercase tracking-[0.16em] text-black shadow-[0_0_22px_rgba(0,255,65,0.35)] transition hover:bg-[#6cff96] disabled:cursor-not-allowed disabled:opacity-60"
+                          className="inline-flex w-full min-h-11.5 items-center justify-center gap-2 rounded-xl border border-[#00FF41]/40 bg-[#00FF41] px-3 py-2 text-sm font-semibold uppercase tracking-[0.16em] text-black shadow-[0_0_22px_rgba(0,255,65,0.35)] transition hover:bg-[#6cff96] disabled:cursor-not-allowed disabled:opacity-60"
                         >
                           {isPublishing ? (
                             <Loader2 className="h-4 w-4 animate-spin" />
