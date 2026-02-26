@@ -4,6 +4,11 @@ import { verifyEvent, type Event } from "nostr-tools";
 
 const CANONICAL_PLACE_ID =
   /^(osm:(node|way|relation):\d+|btcmap:[a-zA-Z0-9:_-]+|manual:[a-zA-Z0-9_-]+|sr:[a-zA-Z0-9:_-]+)$/;
+const LEGACY_DIGITS_ONLY_PLACE_ID = /^\d+$/;
+const MAX_LOG_DEDUPE_KEYS = 5000;
+
+const warnedNonCanonicalPlaceIds = new Set<string>();
+const loggedNormalizedPlaceIds = new Set<string>();
 
 function log(
   level: "info" | "warn" | "error",
@@ -27,6 +32,31 @@ function isValidHex64(v: string | undefined): boolean {
   return !!v && /^[0-9a-f]{64}$/.test(v);
 }
 
+function rememberUniqueKey(keys: Set<string>, key: string): boolean {
+  if (keys.has(key)) return false;
+  if (keys.size >= MAX_LOG_DEDUPE_KEYS) {
+    keys.clear();
+  }
+  keys.add(key);
+  return true;
+}
+
+function canonicalizePlaceId(
+  raw: string,
+): { canonical: string; didNormalize: boolean } | null {
+  // Keep canonical tagged IDs exactly as they came in.
+  if (raw.includes(":") && CANONICAL_PLACE_ID.test(raw)) {
+    return { canonical: raw, didNormalize: false };
+  }
+
+  // Legacy format: bare digits mapped to btcmap node IDs.
+  if (LEGACY_DIGITS_ONLY_PLACE_ID.test(raw)) {
+    return { canonical: `btcmap:node:${raw}`, didNormalize: true };
+  }
+
+  return null;
+}
+
 export async function processSatsRoverEvent(pool: Pool, event: Event) {
   try {
     if (!verifyEvent(event)) return null;
@@ -38,12 +68,28 @@ export async function processSatsRoverEvent(pool: Pool, event: Event) {
       return null;
     }
 
-    const placeId = event.tags.find((t: string[]) => t[0] === "place")?.[1];
-    if (!placeId) return null;
-
-    if (!CANONICAL_PLACE_ID.test(placeId)) {
-      log("warn", "non_canonical_place_id", { placeId, eventId: event.id });
+    const rawPlaceId = event.tags.find((t: string[]) => t[0] === "place")?.[1];
+    if (!rawPlaceId) return null;
+    const canonicalPlace = canonicalizePlaceId(rawPlaceId);
+    if (!canonicalPlace) {
+      if (rememberUniqueKey(warnedNonCanonicalPlaceIds, rawPlaceId)) {
+        log("warn", "non_canonical_place_id", {
+          placeId: rawPlaceId,
+          eventId: event.id,
+        });
+      }
       return null;
+    }
+    const placeId = canonicalPlace.canonical;
+    if (
+      canonicalPlace.didNormalize &&
+      rememberUniqueKey(loggedNormalizedPlaceIds, rawPlaceId)
+    ) {
+      log("info", "place_id_normalized", {
+        rawPlaceId,
+        canonicalPlaceId: placeId,
+        eventId: event.id,
+      });
     }
 
     const status =
