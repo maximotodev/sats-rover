@@ -255,7 +255,7 @@ async def confirm_checkin(
                 """
                 UPDATE checkin_submissions
                 SET status = 'confirmed',
-                    confirmed_at = now(),
+                    confirmed_at = COALESCE(confirmed_at, now()),
                     reason_code=COALESCE(reason_code,'confirmed')
                 WHERE event_id = :event_id
                   AND status = 'pending'
