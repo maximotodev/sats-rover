@@ -104,6 +104,65 @@ class CheckinsIdempotencyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(not_found.status, "not_found")
         self.assertEqual(not_found.reason_code, "unknown_checkin")
 
+    async def test_confirm_creates_pending_submission_row(self):
+        payload = CheckinConfirmIn(
+            event_id="e" * 64,
+            place_id="btcmap:abc",
+            pubkey="f" * 64,
+            payment_evidence={"invoice": "lnbc1demo"},
+        )
+        inserted_params = {}
+
+        async def _db_execute(stmt, params):
+            sql = str(stmt)
+            if "FROM signals" in sql:
+                return _MappingsResult(None)
+            if "INSERT INTO checkin_submissions" in sql:
+                inserted_params.update(params)
+                return _MappingsResult(None)
+            return _MappingsResult(None)
+
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=_db_execute)
+
+        with patch("app.services.signals_service.redis_client.getdel", new=AsyncMock(return_value='{"place_id":"btcmap:abc"}')), patch(
+            "app.services.signals_service.redis_client.setex",
+            new=AsyncMock(return_value=True),
+        ):
+            out = await confirm_checkin(db=db, payload=payload, intent_token="sr_ci_demo")
+
+        self.assertEqual(out.status, "pending")
+        self.assertEqual(out.reason_code, "indexing_delay")
+        self.assertEqual(out.event_id, payload.event_id)
+        self.assertEqual(inserted_params.get("event_id"), payload.event_id)
+        self.assertEqual(inserted_params.get("pubkey"), payload.pubkey)
+        self.assertEqual(inserted_params.get("place_id"), payload.place_id)
+        self.assertEqual(inserted_params.get("reason_code"), "indexing_delay")
+
+    async def test_status_returns_pending_from_db_when_redis_empty(self):
+        db = AsyncMock()
+
+        async def _db_execute(stmt, params):
+            sql = str(stmt)
+            if "FROM checkin_submissions" in sql:
+                return _MappingsResult(
+                    {
+                        "event_id": "d" * 64,
+                        "status": "pending",
+                        "reason_code": "indexing_delay",
+                    }
+                )
+            return _MappingsResult(None)
+
+        db.execute = AsyncMock(side_effect=_db_execute)
+
+        with patch("app.services.signals_service.redis_client.get", new=AsyncMock(return_value=None)):
+            status = await get_checkin_status(db=db, checkin_id="d" * 64)
+
+        self.assertEqual(status.status, "pending")
+        self.assertEqual(status.reason_code, "indexing_delay")
+        self.assertEqual(status.event_id, "d" * 64)
+
 
 if __name__ == "__main__":
     unittest.main()

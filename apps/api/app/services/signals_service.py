@@ -6,6 +6,7 @@ import json
 import logging
 import secrets
 import time
+import uuid
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -201,6 +202,47 @@ async def confirm_checkin(
                 event_id=existing_event_id,
             )
 
+    await db.execute(
+        text(
+            """
+            INSERT INTO checkin_submissions (
+                id,
+                event_id,
+                pubkey,
+                place_id,
+                status,
+                reason_code,
+                raw_event,
+                payment_evidence
+            )
+            VALUES (
+                :id,
+                :event_id,
+                :pubkey,
+                :place_id,
+                'pending',
+                :reason_code,
+                CAST(:raw_event AS JSONB),
+                CAST(:payment_evidence AS JSONB)
+            )
+            ON CONFLICT (event_id) DO NOTHING
+            """
+        ),
+        {
+            "id": str(uuid.uuid4()),
+            "event_id": payload.event_id,
+            "pubkey": payload.pubkey or "",
+            "place_id": payload.place_id,
+            "reason_code": "indexing_delay",
+            "raw_event": None,
+            "payment_evidence": (
+                json.dumps(payload.payment_evidence, separators=(",", ":"))
+                if payload.payment_evidence is not None
+                else None
+            ),
+        },
+    )
+
     pending_key = f"checkin:pending:{payload.event_id}"
     pending_record = {
         "event_id": payload.event_id,
@@ -242,6 +284,45 @@ async def get_checkin_status(
     pubkey: str | None = None,
     place_id: str | None = None,
 ) -> CheckinStatusOut:
+    submission_row = (
+        await db.execute(
+            text(
+                """
+                SELECT event_id, status, reason_code
+                FROM checkin_submissions
+                WHERE event_id = :event_id
+                LIMIT 1
+                """
+            ),
+            {"event_id": checkin_id},
+        )
+    ).mappings().first()
+    if submission_row and isinstance(submission_row.get("status"), str):
+        submission_status = submission_row["status"]
+        reason_code = submission_row.get("reason_code")
+        event_id = submission_row.get("event_id")
+        normalized_reason = reason_code if isinstance(reason_code, str) else None
+        normalized_event_id = event_id if isinstance(event_id, str) else checkin_id
+
+        if submission_status == "pending":
+            return CheckinStatusOut(
+                status="pending",
+                reason_code=normalized_reason or "indexing_delay",
+                event_id=normalized_event_id,
+            )
+        if submission_status == "confirmed":
+            return CheckinStatusOut(
+                status="ok",
+                reason_code=normalized_reason or "confirmed",
+                event_id=normalized_event_id,
+            )
+        if submission_status == "rejected":
+            return CheckinStatusOut(
+                status="failed",
+                reason_code=normalized_reason or "rejected",
+                event_id=normalized_event_id,
+            )
+
     raw_pending = await redis_client.get(f"checkin:pending:{checkin_id}")
     if raw_pending:
         if isinstance(raw_pending, bytes):
