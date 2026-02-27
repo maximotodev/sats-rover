@@ -33,6 +33,7 @@ const RELAY_QUARANTINE_MS = 5 * 60_000;
 const SEEN_EVENT_TTL_MS = 10 * 60_000;
 const SEEN_EVENT_MAX_KEYS = 200_000;
 const SEEN_EVENT_SWEEP_INTERVAL = 1000;
+const SEEN_EVENT_SWEEP_MAX_PER_TICK = 256;
 
 const dropLogDedupe = new Set<string>();
 const pubkeyLimiter = new Map<
@@ -41,6 +42,7 @@ const pubkeyLimiter = new Map<
 >();
 const relayLimiter = new Map<string, { windowStartMs: number; count: number }>();
 const seenEventIds = new Map<string, number>();
+let seenEventSweepCursor: IterableIterator<[string, number]> | null = null;
 let globalTokens = GLOBAL_BUDGET_BURST_TOKENS;
 let globalLastRefillMs = Date.now();
 let budgetTokenDrops = 0;
@@ -148,6 +150,7 @@ function maybeActivateRelayQuarantine(relay: string, stats: RelayStats, nowMs: n
     sample,
     faultRatio: Math.round(faultRatio * 1000) / 1000,
     acceptedInWindow: stats.acceptedInWindow,
+    guardDroppedInWindow: stats.guardDroppedInWindow,
     relayFaultDroppedInWindow: stats.relayFaultDroppedInWindow,
     quarantinedUntilMs: stats.quarantinedUntilMs,
   });
@@ -252,13 +255,31 @@ function isRelayWithinRateLimit(relay: string, nowMs: number): boolean {
 }
 
 function sweepSeenEventIds(nowMs: number): void {
-  for (const [eventId, seenAt] of seenEventIds.entries()) {
+  if (seenEventIds.size === 0) {
+    seenEventSweepCursor = null;
+    return;
+  }
+  if (!seenEventSweepCursor) {
+    seenEventSweepCursor = seenEventIds.entries();
+  }
+
+  let processed = 0;
+  while (processed < SEEN_EVENT_SWEEP_MAX_PER_TICK && seenEventSweepCursor) {
+    const next = seenEventSweepCursor.next();
+    if (next.done) {
+      seenEventSweepCursor = null;
+      break;
+    }
+    processed += 1;
+    const [eventId, seenAt] = next.value;
     if (nowMs - seenAt >= SEEN_EVENT_TTL_MS) {
       seenEventIds.delete(eventId);
     }
   }
+
   if (seenEventIds.size > SEEN_EVENT_MAX_KEYS) {
     seenEventIds.clear();
+    seenEventSweepCursor = null;
   }
 }
 
