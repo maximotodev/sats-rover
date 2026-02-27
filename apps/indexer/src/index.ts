@@ -310,10 +310,7 @@ function clearSeenEventSweepQueue(): void {
 function refillSeenEventSweepQueueIfNeeded(): void {
   if (seenEventSweepQueueIndex < seenEventSweepQueue.length) return;
   clearSeenEventSweepQueue();
-  const refillSeenIds = new Set<string>();
   for (const eventId of seenEventIds.keys()) {
-    if (refillSeenIds.has(eventId)) continue;
-    refillSeenIds.add(eventId);
     seenEventSweepQueue.push(eventId);
     if (seenEventSweepQueue.length >= SEEN_EVENT_SWEEP_QUEUE_MAX_KEYS) {
       break;
