@@ -34,6 +34,8 @@ const SEEN_EVENT_TTL_MS = 10 * 60_000;
 const SEEN_EVENT_MAX_KEYS = 200_000;
 const SEEN_EVENT_SWEEP_INTERVAL = 1000;
 const SEEN_EVENT_SWEEP_MAX_PER_TICK = 256;
+const SEEN_EVENT_SWEEP_QUEUE_MAX_KEYS = 8192;
+const SEEN_EVENT_SWEEP_QUEUE_LOW_WATERMARK = SEEN_EVENT_SWEEP_MAX_PER_TICK;
 const MAX_TAG_FIELD_LENGTH = 200;
 const MAX_CREATED_AT_FUTURE_SKEW_SEC = 10 * 60;
 const MAX_CREATED_AT_AGE_SEC = 30 * 24 * 60 * 60;
@@ -46,7 +48,8 @@ const pubkeyLimiter = new Map<
 >();
 const relayLimiter = new Map<string, { windowStartMs: number; count: number }>();
 const seenEventIds = new Map<string, number>();
-let seenEventSweepCursor: IterableIterator<[string, number]> | null = null;
+const seenEventSweepQueue: string[] = [];
+let seenEventSweepQueueIndex = 0;
 let globalTokens = GLOBAL_BUDGET_BURST_TOKENS;
 let globalLastRefillMs = Date.now();
 let budgetTokenDrops = 0;
@@ -265,32 +268,53 @@ function isRelayWithinRateLimit(relay: string, nowMs: number): boolean {
   return true;
 }
 
-function sweepSeenEventIds(nowMs: number): void {
-  if (seenEventIds.size === 0) {
-    seenEventSweepCursor = null;
-    return;
-  }
-  if (!seenEventSweepCursor) {
-    seenEventSweepCursor = seenEventIds.entries();
-  }
+function clearSeenEventSweepQueue(): void {
+  seenEventSweepQueue.length = 0;
+  seenEventSweepQueueIndex = 0;
+}
 
-  let processed = 0;
-  while (processed < SEEN_EVENT_SWEEP_MAX_PER_TICK && seenEventSweepCursor) {
-    const next = seenEventSweepCursor.next();
-    if (next.done) {
-      seenEventSweepCursor = null;
+function refillSeenEventSweepQueueIfNeeded(): void {
+  const remaining = seenEventSweepQueue.length - seenEventSweepQueueIndex;
+  if (remaining > SEEN_EVENT_SWEEP_QUEUE_LOW_WATERMARK) return;
+  clearSeenEventSweepQueue();
+  for (const eventId of seenEventIds.keys()) {
+    seenEventSweepQueue.push(eventId);
+    if (seenEventSweepQueue.length >= SEEN_EVENT_SWEEP_QUEUE_MAX_KEYS) {
       break;
     }
+  }
+}
+
+function sweepSeenEventIds(nowMs: number): void {
+  if (seenEventIds.size === 0) {
+    clearSeenEventSweepQueue();
+    return;
+  }
+  refillSeenEventSweepQueueIfNeeded();
+
+  let processed = 0;
+  while (
+    processed < SEEN_EVENT_SWEEP_MAX_PER_TICK &&
+    seenEventSweepQueueIndex < seenEventSweepQueue.length
+  ) {
+    const eventId = seenEventSweepQueue[seenEventSweepQueueIndex];
+    seenEventSweepQueueIndex += 1;
     processed += 1;
-    const [eventId, seenAt] = next.value;
+    const seenAt = seenEventIds.get(eventId);
+    if (typeof seenAt !== "number") {
+      continue;
+    }
     if (nowMs - seenAt >= SEEN_EVENT_TTL_MS) {
       seenEventIds.delete(eventId);
     }
   }
+  if (seenEventSweepQueueIndex >= seenEventSweepQueue.length) {
+    clearSeenEventSweepQueue();
+  }
 
   if (seenEventIds.size > SEEN_EVENT_MAX_KEYS) {
     seenEventIds.clear();
-    seenEventSweepCursor = null;
+    clearSeenEventSweepQueue();
   }
 }
 
