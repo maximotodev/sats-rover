@@ -37,6 +37,7 @@ const SEEN_EVENT_SWEEP_MAX_PER_TICK = 256;
 const SEEN_EVENT_SWEEP_QUEUE_MAX_KEYS = 8192;
 const SEEN_EVENT_SWEEP_QUEUE_LOW_WATERMARK = SEEN_EVENT_SWEEP_MAX_PER_TICK;
 const MAX_TAG_FIELD_LENGTH = 200;
+const VERIFICATION_TAG_SCAN_LIMIT = 64;
 const MAX_CREATED_AT_FUTURE_SKEW_SEC = 10 * 60;
 const MAX_CREATED_AT_AGE_SEC = 30 * 24 * 60 * 60;
 const ALLOWED_EVENT_KINDS = new Set([1, 30331]);
@@ -75,6 +76,7 @@ let dropsInvalidCreatedAt = 0;
 let dropsCreatedAtOutOfRange = 0;
 let dropsInvalidTagsShape = 0;
 let dropsTagValueTooLong = 0;
+let dropsTagsScanLimitExceeded = 0;
 let verificationGatePassed = 0;
 let seenEventSweepTick = 0;
 
@@ -432,6 +434,7 @@ function passesVerificationGate(
   }
 
   const createdAt = event?.created_at;
+  // Keep created_at strict: do not accept stringified ints; reject instead.
   if (
     typeof createdAt !== "number" ||
     !Number.isFinite(createdAt) ||
@@ -449,6 +452,9 @@ function passesVerificationGate(
   const tags = event?.tags;
   if (!Array.isArray(tags)) {
     return { ok: false, reason: "invalid_tags_shape" };
+  }
+  if (tags.length > VERIFICATION_TAG_SCAN_LIMIT) {
+    return { ok: false, reason: "tags_scan_limit_exceeded" };
   }
   for (const tag of tags) {
     if (!Array.isArray(tag) || typeof tag[0] !== "string") {
@@ -579,6 +585,7 @@ function startStatsTimerIfNeeded(): void {
       dropsCreatedAtOutOfRange,
       dropsInvalidTagsShape,
       dropsTagValueTooLong,
+      dropsTagsScanLimitExceeded,
       verificationGatePassed,
     });
   }, 60_000);
@@ -679,6 +686,8 @@ function connect(url: string) {
             dropsInvalidTagsShape += 1;
           } else if (reason === "tag_value_too_long") {
             dropsTagValueTooLong += 1;
+          } else if (reason === "tags_scan_limit_exceeded") {
+            dropsTagsScanLimitExceeded += 1;
           }
           recordDropped(url, reason, "guard", nowMs);
           maybeLogDrop({
