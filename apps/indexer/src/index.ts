@@ -1,6 +1,7 @@
 import { WebSocket } from "ws";
 import { Pool } from "pg";
 import dotenv from "dotenv";
+import { getEventHash, verifyEvent } from "nostr-tools";
 import { processSatsRoverEvent } from "./importer.js";
 
 dotenv.config();
@@ -23,6 +24,8 @@ const PUBKEY_MAX_EVENTS_PER_WINDOW = 30;
 const PUBKEY_LIMITER_MAX_KEYS = 20_000;
 const GLOBAL_BUDGET_TOKENS_PER_SEC = 200;
 const GLOBAL_BUDGET_BURST_TOKENS = 400;
+const SIGVERIFY_TOKENS_PER_SEC = 120;
+const SIGVERIFY_BURST_TOKENS = 240;
 const RELAY_WINDOW_MS = 10_000;
 const RELAY_MAX_EVENTS_PER_WINDOW = 120;
 const RELAY_LIMITER_MAX_KEYS = 2000;
@@ -52,6 +55,8 @@ const seenEventSweepQueue: string[] = [];
 let seenEventSweepQueueIndex = 0;
 let globalTokens = GLOBAL_BUDGET_BURST_TOKENS;
 let globalLastRefillMs = Date.now();
+let sigverifyTokens = SIGVERIFY_BURST_TOKENS;
+let sigverifyLastRefillMs = Date.now();
 let budgetTokenDrops = 0;
 let budgetTokenConsumes = 0;
 let statsTimerStarted = false;
@@ -82,6 +87,12 @@ let verificationGatePassed = 0;
 let expensivePathAttempts = 0;
 let expensivePathSkippedByBudget = 0;
 let expensivePathInvoked = 0;
+let sigverifyAttempts = 0;
+let sigverifyBudgetDrops = 0;
+let sigverifyInvoked = 0;
+let sigverifyPassed = 0;
+let sigverifyFailedInvalidId = 0;
+let sigverifyFailedInvalidSig = 0;
 let seenEventSweepTick = 0;
 
 type RelayStats = {
@@ -219,6 +230,23 @@ function tryConsumeGlobalToken(nowMs: number): boolean {
   }
   globalTokens -= 1;
   budgetTokenConsumes += 1;
+  return true;
+}
+
+function refillSigverifyTokens(nowMs: number): void {
+  const elapsedMs = Math.max(0, nowMs - sigverifyLastRefillMs);
+  sigverifyLastRefillMs = nowMs;
+  if (elapsedMs === 0) return;
+  const tokensToAdd = (elapsedMs / 1000) * SIGVERIFY_TOKENS_PER_SEC;
+  sigverifyTokens = Math.min(SIGVERIFY_BURST_TOKENS, sigverifyTokens + tokensToAdd);
+}
+
+function tryConsumeSigverifyToken(nowMs: number): boolean {
+  refillSigverifyTokens(nowMs);
+  if (sigverifyTokens < 1) {
+    return false;
+  }
+  sigverifyTokens -= 1;
   return true;
 }
 
@@ -502,6 +530,23 @@ function passesSignaturePrereqGate(
   return { ok: true };
 }
 
+function verifyEventSignature(
+  event: any,
+): { ok: true } | { ok: false; reason: "sigverify_invalid_id" | "sigverify_invalid_sig" } {
+  try {
+    const computedId = getEventHash(event);
+    if (computedId !== event.id) {
+      return { ok: false, reason: "sigverify_invalid_id" };
+    }
+  } catch {
+    return { ok: false, reason: "sigverify_invalid_id" };
+  }
+  if (!verifyEvent(event)) {
+    return { ok: false, reason: "sigverify_invalid_sig" };
+  }
+  return { ok: true };
+}
+
 type EnvelopeValidationResult =
   | { kind: "drop"; reason: "invalid_ws_frame_shape" | "invalid_event_frame_shape" | "missing_event_object" }
   | { kind: "ignore" }
@@ -544,6 +589,9 @@ function maybeLogDrop(opts: {
     reason === "relay_quarantined" ||
     reason === "relay_rate_limited" ||
     reason === "verification_budget_exhausted" ||
+    reason === "sigverify_budget_exhausted" ||
+    reason === "sigverify_invalid_id" ||
+    reason === "sigverify_invalid_sig" ||
     reason === "tags_scan_limit_exceeded" ||
     reason === "invalid_ws_frame_shape" ||
     reason === "invalid_event_frame_shape" ||
@@ -595,6 +643,9 @@ function startStatsTimerIfNeeded(): void {
       drops: budgetTokenDrops,
       tokensPerSec: GLOBAL_BUDGET_TOKENS_PER_SEC,
       burstTokens: GLOBAL_BUDGET_BURST_TOKENS,
+      sigverifyTokens: Math.round(sigverifyTokens),
+      sigverifyTokensPerSec: SIGVERIFY_TOKENS_PER_SEC,
+      sigverifyBurstTokens: SIGVERIFY_BURST_TOKENS,
     });
     log("info", "ingest_guard_stats", {
       eventsSeen,
@@ -624,6 +675,12 @@ function startStatsTimerIfNeeded(): void {
       expensivePathAttempts,
       expensivePathSkippedByBudget,
       expensivePathInvoked,
+      sigverifyAttempts,
+      sigverifyBudgetDrops,
+      sigverifyInvoked,
+      sigverifyPassed,
+      sigverifyFailedInvalidId,
+      sigverifyFailedInvalidSig,
     });
   }, 60_000);
 }
@@ -806,6 +863,40 @@ function connect(url: string) {
           });
           return;
         }
+        sigverifyAttempts += 1;
+        if (!tryConsumeSigverifyToken(nowMs)) {
+          const reason = "sigverify_budget_exhausted";
+          sigverifyBudgetDrops += 1;
+          recordDropped(url, reason, "guard", nowMs);
+          maybeLogDrop({
+            msg: "event_dropped_budget",
+            reason,
+            pubkey: prefilter.pubkey,
+            eventId: prefilter.eventId,
+            relay: url,
+          });
+          return;
+        }
+        sigverifyInvoked += 1;
+        const signatureVerification = verifyEventSignature(event);
+        if (!signatureVerification.ok) {
+          const reason = signatureVerification.reason;
+          if (reason === "sigverify_invalid_id") {
+            sigverifyFailedInvalidId += 1;
+          } else {
+            sigverifyFailedInvalidSig += 1;
+          }
+          recordDropped(url, reason, "guard", nowMs);
+          maybeLogDrop({
+            msg: "event_dropped_prefilter",
+            reason,
+            pubkey: prefilter.pubkey,
+            eventId: prefilter.eventId,
+            relay: url,
+          });
+          return;
+        }
+        sigverifyPassed += 1;
 
         expensivePathInvoked += 1;
         recordAccepted(url, nowMs);
