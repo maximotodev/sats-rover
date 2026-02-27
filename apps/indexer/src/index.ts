@@ -77,7 +77,11 @@ let dropsCreatedAtOutOfRange = 0;
 let dropsInvalidTagsShape = 0;
 let dropsTagValueTooLong = 0;
 let dropsTagsScanLimitExceeded = 0;
+let dropsInvalidSigHex = 0;
 let verificationGatePassed = 0;
+let expensivePathAttempts = 0;
+let expensivePathSkippedByBudget = 0;
+let expensivePathInvoked = 0;
 let seenEventSweepTick = 0;
 
 type RelayStats = {
@@ -353,6 +357,18 @@ function isHex64(value: string): boolean {
   return true;
 }
 
+function isHex128(value: string): boolean {
+  if (value.length !== 128) return false;
+  for (let i = 0; i < 128; i += 1) {
+    const code = value.charCodeAt(i);
+    const isDigit = code >= 48 && code <= 57;
+    const isLowerHex = code >= 97 && code <= 102;
+    const isUpperHex = code >= 65 && code <= 70;
+    if (!isDigit && !isLowerHex && !isUpperHex) return false;
+  }
+  return true;
+}
+
 function shouldProcessEvent(event: any): {
   ok: boolean;
   reason?: string;
@@ -471,6 +487,16 @@ function passesVerificationGate(
   return { ok: true };
 }
 
+function passesSignaturePrereqGate(
+  event: any,
+): { ok: true } | { ok: false; reason: string } {
+  const sig = event?.sig;
+  if (typeof sig !== "string" || !isHex128(sig)) {
+    return { ok: false, reason: "invalid_sig_hex" };
+  }
+  return { ok: true };
+}
+
 type EnvelopeValidationResult =
   | { kind: "drop"; reason: "invalid_ws_frame_shape" | "invalid_event_frame_shape" | "missing_event_object" }
   | { kind: "ignore" }
@@ -586,7 +612,11 @@ function startStatsTimerIfNeeded(): void {
       dropsInvalidTagsShape,
       dropsTagValueTooLong,
       dropsTagsScanLimitExceeded,
+      dropsInvalidSigHex,
       verificationGatePassed,
+      expensivePathAttempts,
+      expensivePathSkippedByBudget,
+      expensivePathInvoked,
     });
   }, 60_000);
 }
@@ -700,6 +730,20 @@ function connect(url: string) {
           return;
         }
         verificationGatePassed += 1;
+        const sigGate = passesSignaturePrereqGate(event);
+        if (!sigGate.ok) {
+          const reason = sigGate.reason;
+          if (reason === "invalid_sig_hex") dropsInvalidSigHex += 1;
+          recordDropped(url, reason, "guard", nowMs);
+          maybeLogDrop({
+            msg: "event_dropped_prefilter",
+            reason,
+            pubkey: prefilter.pubkey,
+            eventId: prefilter.eventId,
+            relay: url,
+          });
+          return;
+        }
 
         if (stats.quarantinedUntilMs > nowMs) {
           const reason = "relay_quarantined";
@@ -739,8 +783,10 @@ function connect(url: string) {
           });
           return;
         }
+        expensivePathAttempts += 1;
         if (!tryConsumeGlobalToken(nowMs)) {
           const reason = "verification_budget_exhausted";
+          expensivePathSkippedByBudget += 1;
           recordDropped(url, reason, "guard", nowMs);
           stats.budgetDropped += 1;
           maybeLogDrop({
@@ -753,6 +799,7 @@ function connect(url: string) {
           return;
         }
 
+        expensivePathInvoked += 1;
         recordAccepted(url, nowMs);
         const result = await processSatsRoverEvent(pool, event);
         if (result) {
