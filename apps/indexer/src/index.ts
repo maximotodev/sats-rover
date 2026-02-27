@@ -61,6 +61,8 @@ type RelayStats = {
   windowStartMs: number;
   acceptedInWindow: number;
   droppedInWindow: number;
+  guardDroppedInWindow: number;
+  relayFaultDroppedInWindow: number;
   quarantinedUntilMs: number;
   droppedByReason: Record<string, number>;
 };
@@ -105,6 +107,8 @@ function getRelayStats(relay: string): RelayStats {
     windowStartMs: Date.now(),
     acceptedInWindow: 0,
     droppedInWindow: 0,
+    guardDroppedInWindow: 0,
+    relayFaultDroppedInWindow: 0,
     quarantinedUntilMs: 0,
     droppedByReason: {},
   };
@@ -117,29 +121,43 @@ function refreshRelayHealthWindow(stats: RelayStats, nowMs: number): void {
   stats.windowStartMs = nowMs;
   stats.acceptedInWindow = 0;
   stats.droppedInWindow = 0;
+  stats.guardDroppedInWindow = 0;
+  stats.relayFaultDroppedInWindow = 0;
 }
 
 function maybeActivateRelayQuarantine(relay: string, stats: RelayStats, nowMs: number): void {
   if (stats.quarantinedUntilMs > nowMs) return;
-  const sample = stats.acceptedInWindow + stats.droppedInWindow;
+  const sample = stats.acceptedInWindow + stats.relayFaultDroppedInWindow;
   if (sample < RELAY_HEALTH_MIN_SAMPLE) return;
-  const dropRatio = stats.droppedInWindow / sample;
-  if (dropRatio < RELAY_HEALTH_DROP_RATIO_THRESHOLD) return;
+  const faultRatio = stats.relayFaultDroppedInWindow / sample;
+  if (faultRatio < RELAY_HEALTH_DROP_RATIO_THRESHOLD) return;
 
   stats.quarantinedUntilMs = nowMs + RELAY_QUARANTINE_MS;
   log("warn", "relay_quarantine_activated", {
     relay,
     sample,
-    dropRatio: Math.round(dropRatio * 1000) / 1000,
+    faultRatio: Math.round(faultRatio * 1000) / 1000,
+    acceptedInWindow: stats.acceptedInWindow,
+    relayFaultDroppedInWindow: stats.relayFaultDroppedInWindow,
     quarantinedUntilMs: stats.quarantinedUntilMs,
   });
 }
 
-function recordDropped(relay: string, reason: string, nowMs = Date.now()): void {
+function recordDropped(
+  relay: string,
+  reason: string,
+  kind: "guard" | "relay_fault",
+  nowMs = Date.now(),
+): void {
   const stats = getRelayStats(relay);
   refreshRelayHealthWindow(stats, nowMs);
   stats.dropped += 1;
   stats.droppedInWindow += 1;
+  if (kind === "guard") {
+    stats.guardDroppedInWindow += 1;
+  } else {
+    stats.relayFaultDroppedInWindow += 1;
+  }
   stats.droppedByReason[reason] = (stats.droppedByReason[reason] || 0) + 1;
   maybeActivateRelayQuarantine(relay, stats, nowMs);
 }
@@ -308,7 +326,8 @@ function maybeLogDrop(opts: {
     | "event_dropped_prefilter"
     | "event_dropped_rate_limited"
     | "event_dropped_budget"
-    | "event_dropped_quarantined";
+    | "event_dropped_quarantined"
+    | "event_dropped_relay_fault";
   reason: string;
   pubkey: string | undefined;
   eventId: string | undefined;
@@ -335,8 +354,9 @@ function startStatsTimerIfNeeded(): void {
   statsTimerStarted = true;
   setInterval(() => {
     for (const [relay, stats] of relayStats.entries()) {
-      const sample = stats.acceptedInWindow + stats.droppedInWindow;
-      const dropRatio = sample > 0 ? stats.droppedInWindow / sample : 0;
+      const sample = stats.acceptedInWindow + stats.relayFaultDroppedInWindow;
+      const faultRatio =
+        sample > 0 ? stats.relayFaultDroppedInWindow / sample : 0;
       log("info", "relay_ingest_stats", {
         relay,
         accepted: stats.accepted,
@@ -346,7 +366,9 @@ function startStatsTimerIfNeeded(): void {
         budgetDropped: stats.budgetDropped,
         acceptedInWindow: stats.acceptedInWindow,
         droppedInWindow: stats.droppedInWindow,
-        dropRatio: Math.round(dropRatio * 1000) / 1000,
+        guardDroppedInWindow: stats.guardDroppedInWindow,
+        relayFaultDroppedInWindow: stats.relayFaultDroppedInWindow,
+        faultRatio: Math.round(faultRatio * 1000) / 1000,
         quarantinedUntilMs:
           stats.quarantinedUntilMs > 0 ? stats.quarantinedUntilMs : null,
         quarantinedUntilIso:
@@ -399,7 +421,29 @@ function connect(url: string) {
       const msg = JSON.parse(data.toString());
       parsed = true;
       eventsParsedOk += 1;
+      if (!Array.isArray(msg) || typeof msg[0] !== "string") {
+        recordDropped(url, "invalid_message_envelope", "relay_fault", nowMs);
+        maybeLogDrop({
+          msg: "event_dropped_relay_fault",
+          reason: "invalid_message_envelope",
+          pubkey: undefined,
+          eventId: undefined,
+          relay: url,
+        });
+        return;
+      }
       if (msg[0] === "EVENT") {
+        if (msg.length < 3 || !msg[2] || typeof msg[2] !== "object") {
+          recordDropped(url, "invalid_event_frame", "relay_fault", nowMs);
+          maybeLogDrop({
+            msg: "event_dropped_relay_fault",
+            reason: "invalid_event_frame",
+            pubkey: undefined,
+            eventId: undefined,
+            relay: url,
+          });
+          return;
+        }
         const event = msg[2];
         const stats = getRelayStats(url);
         refreshRelayHealthWindow(stats, nowMs);
@@ -414,7 +458,7 @@ function connect(url: string) {
           if (reason === "place_tag_too_long") dropsPlaceTooLong += 1;
           if (reason === "too_many_tags") dropsTooManyTags += 1;
           if (reason === "content_too_large") dropsContentTooLarge += 1;
-          recordDropped(url, reason, nowMs);
+          recordDropped(url, reason, "guard", nowMs);
           maybeLogDrop({
             msg: "event_dropped_prefilter",
             reason,
@@ -427,7 +471,7 @@ function connect(url: string) {
 
         if (stats.quarantinedUntilMs > nowMs) {
           const reason = "relay_quarantined";
-          recordDropped(url, reason, nowMs);
+          recordDropped(url, reason, "guard", nowMs);
           maybeLogDrop({
             msg: "event_dropped_quarantined",
             reason,
@@ -439,7 +483,7 @@ function connect(url: string) {
         }
         if (!isRelayWithinRateLimit(url, nowMs)) {
           const reason = "relay_rate_limited";
-          recordDropped(url, reason, nowMs);
+          recordDropped(url, reason, "guard", nowMs);
           stats.rateLimited += 1;
           maybeLogDrop({
             msg: "event_dropped_rate_limited",
@@ -452,7 +496,7 @@ function connect(url: string) {
         }
         if (!isPubkeyWithinRateLimit(prefilter.pubkey!, nowMs)) {
           const reason = "pubkey_rate_limited";
-          recordDropped(url, reason, nowMs);
+          recordDropped(url, reason, "guard", nowMs);
           stats.pubkeyLimited += 1;
           maybeLogDrop({
             msg: "event_dropped_rate_limited",
@@ -465,7 +509,7 @@ function connect(url: string) {
         }
         if (!tryConsumeGlobalToken(nowMs)) {
           const reason = "verification_budget_exhausted";
-          recordDropped(url, reason, nowMs);
+          recordDropped(url, reason, "guard", nowMs);
           stats.budgetDropped += 1;
           maybeLogDrop({
             msg: "event_dropped_budget",
@@ -490,6 +534,14 @@ function connect(url: string) {
     } catch (e: any) {
       if (!parsed) {
         eventsParsedFail += 1;
+        const nowMs = Date.now();
+        recordDropped(url, "relay_message_parse_error", "relay_fault", nowMs);
+      } else {
+        log("error", "relay_message_handler_error", {
+          relay: url,
+          error: e?.message || String(e),
+        });
+        return;
       }
       log("error", "relay_message_parse_error", {
         relay: url,
