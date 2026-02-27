@@ -34,6 +34,10 @@ const SEEN_EVENT_TTL_MS = 10 * 60_000;
 const SEEN_EVENT_MAX_KEYS = 200_000;
 const SEEN_EVENT_SWEEP_INTERVAL = 1000;
 const SEEN_EVENT_SWEEP_MAX_PER_TICK = 256;
+const MAX_TAG_FIELD_LENGTH = 200;
+const MAX_CREATED_AT_FUTURE_SKEW_SEC = 10 * 60;
+const MAX_CREATED_AT_AGE_SEC = 30 * 24 * 60 * 60;
+const ALLOWED_EVENT_KINDS = new Set([1, 30331]);
 
 const dropLogDedupe = new Set<string>();
 const pubkeyLimiter = new Map<
@@ -62,6 +66,13 @@ let dropsInvalidWsFrameShape = 0;
 let dropsInvalidEventFrameShape = 0;
 let dropsMissingEventObject = 0;
 let dropsInvalidWsJson = 0;
+let dropsInvalidKind = 0;
+let dropsDisallowedKind = 0;
+let dropsInvalidCreatedAt = 0;
+let dropsCreatedAtOutOfRange = 0;
+let dropsInvalidTagsShape = 0;
+let dropsTagValueTooLong = 0;
+let verificationGatePassed = 0;
 let seenEventSweepTick = 0;
 
 type RelayStats = {
@@ -384,6 +395,52 @@ function shouldProcessEvent(event: any): {
   return { ok: true, pubkey, eventId };
 }
 
+function passesVerificationGate(
+  event: any,
+  nowSec: number,
+): { ok: true } | { ok: false; reason: string } {
+  const kind = event?.kind;
+  if (typeof kind !== "number" || !Number.isFinite(kind)) {
+    return { ok: false, reason: "invalid_kind" };
+  }
+  if (!ALLOWED_EVENT_KINDS.has(kind)) {
+    return { ok: false, reason: "disallowed_kind" };
+  }
+
+  const createdAt = event?.created_at;
+  if (
+    typeof createdAt !== "number" ||
+    !Number.isFinite(createdAt) ||
+    !Number.isInteger(createdAt)
+  ) {
+    return { ok: false, reason: "invalid_created_at" };
+  }
+  if (
+    createdAt > nowSec + MAX_CREATED_AT_FUTURE_SKEW_SEC ||
+    createdAt < nowSec - MAX_CREATED_AT_AGE_SEC
+  ) {
+    return { ok: false, reason: "created_at_out_of_range" };
+  }
+
+  const tags = event?.tags;
+  if (!Array.isArray(tags)) {
+    return { ok: false, reason: "invalid_tags_shape" };
+  }
+  for (const tag of tags) {
+    if (!Array.isArray(tag) || typeof tag[0] !== "string") {
+      return { ok: false, reason: "invalid_tags_shape" };
+    }
+    if (tag[0].length > MAX_TAG_FIELD_LENGTH) {
+      return { ok: false, reason: "tag_value_too_long" };
+    }
+    if (tag.length > 1 && typeof tag[1] === "string" && tag[1].length > MAX_TAG_FIELD_LENGTH) {
+      return { ok: false, reason: "tag_value_too_long" };
+    }
+  }
+
+  return { ok: true };
+}
+
 type EnvelopeValidationResult =
   | { kind: "drop"; reason: "invalid_ws_frame_shape" | "invalid_event_frame_shape" | "missing_event_object" }
   | { kind: "ignore" }
@@ -492,6 +549,13 @@ function startStatsTimerIfNeeded(): void {
       dropsInvalidEventFrameShape,
       dropsMissingEventObject,
       dropsInvalidWsJson,
+      dropsInvalidKind,
+      dropsDisallowedKind,
+      dropsInvalidCreatedAt,
+      dropsCreatedAtOutOfRange,
+      dropsInvalidTagsShape,
+      dropsTagValueTooLong,
+      verificationGatePassed,
     });
   }, 60_000);
 }
@@ -578,6 +642,31 @@ function connect(url: string) {
           });
           return;
         }
+        const nowSec = Math.floor(nowMs / 1000);
+        const verificationGate = passesVerificationGate(event, nowSec);
+        if (!verificationGate.ok) {
+          const reason = verificationGate.reason;
+          if (reason === "invalid_kind") dropsInvalidKind += 1;
+          else if (reason === "disallowed_kind") dropsDisallowedKind += 1;
+          else if (reason === "invalid_created_at") dropsInvalidCreatedAt += 1;
+          else if (reason === "created_at_out_of_range") {
+            dropsCreatedAtOutOfRange += 1;
+          } else if (reason === "invalid_tags_shape") {
+            dropsInvalidTagsShape += 1;
+          } else if (reason === "tag_value_too_long") {
+            dropsTagValueTooLong += 1;
+          }
+          recordDropped(url, reason, "guard", nowMs);
+          maybeLogDrop({
+            msg: "event_dropped_prefilter",
+            reason,
+            pubkey: prefilter.pubkey,
+            eventId: prefilter.eventId,
+            relay: url,
+          });
+          return;
+        }
+        verificationGatePassed += 1;
 
         if (stats.quarantinedUntilMs > nowMs) {
           const reason = "relay_quarantined";
