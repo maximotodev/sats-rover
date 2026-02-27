@@ -35,7 +35,6 @@ const SEEN_EVENT_MAX_KEYS = 200_000;
 const SEEN_EVENT_SWEEP_INTERVAL = 1000;
 const SEEN_EVENT_SWEEP_MAX_PER_TICK = 256;
 const SEEN_EVENT_SWEEP_QUEUE_MAX_KEYS = 8192;
-const SEEN_EVENT_SWEEP_QUEUE_LOW_WATERMARK = SEEN_EVENT_SWEEP_MAX_PER_TICK;
 const MAX_TAG_FIELD_LENGTH = 200;
 const VERIFICATION_TAG_SCAN_LIMIT = 64;
 const MAX_CREATED_AT_FUTURE_SKEW_SEC = 10 * 60;
@@ -280,10 +279,12 @@ function clearSeenEventSweepQueue(): void {
 }
 
 function refillSeenEventSweepQueueIfNeeded(): void {
-  const remaining = seenEventSweepQueue.length - seenEventSweepQueueIndex;
-  if (remaining > SEEN_EVENT_SWEEP_QUEUE_LOW_WATERMARK) return;
+  if (seenEventSweepQueueIndex < seenEventSweepQueue.length) return;
   clearSeenEventSweepQueue();
+  const refillSeenIds = new Set<string>();
   for (const eventId of seenEventIds.keys()) {
+    if (refillSeenIds.has(eventId)) continue;
+    refillSeenIds.add(eventId);
     seenEventSweepQueue.push(eventId);
     if (seenEventSweepQueue.length >= SEEN_EVENT_SWEEP_QUEUE_MAX_KEYS) {
       break;
