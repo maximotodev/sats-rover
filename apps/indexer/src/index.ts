@@ -540,6 +540,7 @@ function maybeLogDrop(opts: {
     reason === "relay_quarantined" ||
     reason === "relay_rate_limited" ||
     reason === "verification_budget_exhausted" ||
+    reason === "tags_scan_limit_exceeded" ||
     reason === "invalid_ws_frame_shape" ||
     reason === "invalid_event_frame_shape" ||
     reason === "missing_event_object" ||
