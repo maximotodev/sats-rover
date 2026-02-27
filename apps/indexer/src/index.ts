@@ -42,6 +42,15 @@ let globalLastRefillMs = Date.now();
 let budgetTokenDrops = 0;
 let budgetTokenConsumes = 0;
 let statsTimerStarted = false;
+let eventsSeen = 0;
+let eventsParsedOk = 0;
+let eventsParsedFail = 0;
+let dropsInvalidIdHex = 0;
+let dropsInvalidPubkeyHex = 0;
+let dropsMissingPlace = 0;
+let dropsPlaceTooLong = 0;
+let dropsTooManyTags = 0;
+let dropsContentTooLarge = 0;
 
 type RelayStats = {
   accepted: number;
@@ -214,6 +223,18 @@ function isRelayWithinRateLimit(relay: string, nowMs: number): boolean {
   return true;
 }
 
+function isHex64(value: string): boolean {
+  if (value.length !== 64) return false;
+  for (let i = 0; i < 64; i += 1) {
+    const code = value.charCodeAt(i);
+    const isDigit = code >= 48 && code <= 57;
+    const isLowerHex = code >= 97 && code <= 102;
+    const isUpperHex = code >= 65 && code <= 70;
+    if (!isDigit && !isLowerHex && !isUpperHex) return false;
+  }
+  return true;
+}
+
 function shouldProcessEvent(event: any): {
   ok: boolean;
   reason?: string;
@@ -223,17 +244,29 @@ function shouldProcessEvent(event: any): {
   if (!event || typeof event !== "object") {
     return { ok: false, reason: "invalid_event_shape" };
   }
-  const eventId = typeof event.id === "string" ? event.id : undefined;
-  const pubkey = typeof event.pubkey === "string" ? event.pubkey : undefined;
-  if (!eventId) {
-    return { ok: false, reason: "missing_event_id", pubkey, eventId };
+  const eventId = event.id;
+  const pubkey = event.pubkey;
+  if (typeof eventId !== "string" || !isHex64(eventId)) {
+    return {
+      ok: false,
+      reason:
+        typeof eventId === "string" ? "invalid_event_id_hex" : "missing_event_id",
+      pubkey: typeof pubkey === "string" ? pubkey : undefined,
+      eventId: typeof eventId === "string" ? eventId : undefined,
+    };
   }
-  if (!pubkey) {
-    return { ok: false, reason: "missing_pubkey", pubkey, eventId };
+  if (typeof pubkey !== "string" || !isHex64(pubkey)) {
+    return {
+      ok: false,
+      reason:
+        typeof pubkey === "string" ? "invalid_pubkey_hex" : "missing_pubkey",
+      pubkey: typeof pubkey === "string" ? pubkey : undefined,
+      eventId,
+    };
   }
 
-  const tags = Array.isArray(event.tags) ? event.tags : null;
-  if (!tags) {
+  const tags = event.tags;
+  if (!Array.isArray(tags)) {
     return { ok: false, reason: "missing_tags", pubkey, eventId };
   }
   if (tags.length > PREFILTER_MAX_TAGS) {
@@ -274,7 +307,8 @@ function maybeLogDrop(opts: {
   msg:
     | "event_dropped_prefilter"
     | "event_dropped_rate_limited"
-    | "event_dropped_budget";
+    | "event_dropped_budget"
+    | "event_dropped_quarantined";
   reason: string;
   pubkey: string | undefined;
   eventId: string | undefined;
@@ -329,6 +363,17 @@ function startStatsTimerIfNeeded(): void {
       tokensPerSec: GLOBAL_BUDGET_TOKENS_PER_SEC,
       burstTokens: GLOBAL_BUDGET_BURST_TOKENS,
     });
+    log("info", "ingest_guard_stats", {
+      eventsSeen,
+      eventsParsedOk,
+      eventsParsedFail,
+      dropsInvalidIdHex,
+      dropsInvalidPubkeyHex,
+      dropsMissingPlace,
+      dropsPlaceTooLong,
+      dropsTooManyTags,
+      dropsContentTooLarge,
+    });
   }, 60_000);
 }
 
@@ -347,14 +392,29 @@ function connect(url: string) {
   });
 
   ws.on("message", async (data: any) => {
+    eventsSeen += 1;
+    let parsed = false;
     try {
+      const nowMs = Date.now();
       const msg = JSON.parse(data.toString());
+      parsed = true;
+      eventsParsedOk += 1;
       if (msg[0] === "EVENT") {
         const event = msg[2];
+        const stats = getRelayStats(url);
+        refreshRelayHealthWindow(stats, nowMs);
         const prefilter = shouldProcessEvent(event);
         if (!prefilter.ok) {
           const reason = prefilter.reason || "prefilter_rejected";
-          recordDropped(url, reason);
+          if (reason === "invalid_event_id_hex") dropsInvalidIdHex += 1;
+          if (reason === "invalid_pubkey_hex") dropsInvalidPubkeyHex += 1;
+          if (reason === "missing_place_tag" || reason === "empty_place_tag") {
+            dropsMissingPlace += 1;
+          }
+          if (reason === "place_tag_too_long") dropsPlaceTooLong += 1;
+          if (reason === "too_many_tags") dropsTooManyTags += 1;
+          if (reason === "content_too_large") dropsContentTooLarge += 1;
+          recordDropped(url, reason, nowMs);
           maybeLogDrop({
             msg: "event_dropped_prefilter",
             reason,
@@ -365,14 +425,11 @@ function connect(url: string) {
           return;
         }
 
-        const nowMs = Date.now();
-        const stats = getRelayStats(url);
-        refreshRelayHealthWindow(stats, nowMs);
         if (stats.quarantinedUntilMs > nowMs) {
           const reason = "relay_quarantined";
           recordDropped(url, reason, nowMs);
           maybeLogDrop({
-            msg: "event_dropped_rate_limited",
+            msg: "event_dropped_quarantined",
             reason,
             pubkey: prefilter.pubkey,
             eventId: prefilter.eventId,
@@ -431,6 +488,9 @@ function connect(url: string) {
         }
       }
     } catch (e: any) {
+      if (!parsed) {
+        eventsParsedFail += 1;
+      }
       log("error", "relay_message_parse_error", {
         relay: url,
         error: e?.message || String(e),
