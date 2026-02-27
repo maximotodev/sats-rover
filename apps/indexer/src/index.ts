@@ -56,6 +56,10 @@ let dropsPlaceTooLong = 0;
 let dropsTooManyTags = 0;
 let dropsContentTooLarge = 0;
 let dropsDuplicateEventId = 0;
+let dropsInvalidWsFrameShape = 0;
+let dropsInvalidEventFrameShape = 0;
+let dropsMissingEventObject = 0;
+let dropsInvalidWsJson = 0;
 let seenEventSweepTick = 0;
 
 type RelayStats = {
@@ -359,6 +363,31 @@ function shouldProcessEvent(event: any): {
   return { ok: true, pubkey, eventId };
 }
 
+type EnvelopeValidationResult =
+  | { kind: "drop"; reason: "invalid_ws_frame_shape" | "invalid_event_frame_shape" | "missing_event_object" }
+  | { kind: "ignore" }
+  | { kind: "event"; event: any };
+
+function validateInboundEnvelope(msg: any): EnvelopeValidationResult {
+  if (!Array.isArray(msg) || typeof msg[0] !== "string") {
+    return { kind: "drop", reason: "invalid_ws_frame_shape" };
+  }
+  if (msg[0] !== "EVENT") {
+    return { kind: "ignore" };
+  }
+  if (msg.length < 3) {
+    return { kind: "drop", reason: "invalid_event_frame_shape" };
+  }
+  const eventCandidate = msg[2];
+  if (eventCandidate == null) {
+    return { kind: "drop", reason: "missing_event_object" };
+  }
+  if (typeof eventCandidate !== "object") {
+    return { kind: "drop", reason: "invalid_event_frame_shape" };
+  }
+  return { kind: "event", event: eventCandidate };
+}
+
 function maybeLogDrop(opts: {
   msg:
     | "event_dropped_prefilter"
@@ -375,7 +404,11 @@ function maybeLogDrop(opts: {
   const dedupeKey =
     reason === "relay_quarantined" ||
     reason === "relay_rate_limited" ||
-    reason === "verification_budget_exhausted"
+    reason === "verification_budget_exhausted" ||
+    reason === "invalid_ws_frame_shape" ||
+    reason === "invalid_event_frame_shape" ||
+    reason === "missing_event_object" ||
+    reason === "invalid_ws_json"
       ? `${msg}:${reason}:${relay}`
       : `${msg}:${reason}:${pubkey || "unknown"}`;
   if (!rememberDropLogKey(dedupeKey)) return;
@@ -434,6 +467,10 @@ function startStatsTimerIfNeeded(): void {
       dropsTooManyTags,
       dropsContentTooLarge,
       dropsDuplicateEventId,
+      dropsInvalidWsFrameShape,
+      dropsInvalidEventFrameShape,
+      dropsMissingEventObject,
+      dropsInvalidWsJson,
     });
   }, 60_000);
 }
@@ -460,30 +497,30 @@ function connect(url: string) {
       const msg = JSON.parse(data.toString());
       parsed = true;
       eventsParsedOk += 1;
-      if (!Array.isArray(msg) || typeof msg[0] !== "string") {
-        recordDropped(url, "invalid_message_envelope", "relay_fault", nowMs);
+      const envelope = validateInboundEnvelope(msg);
+      if (envelope.kind === "ignore") {
+        return;
+      }
+      if (envelope.kind === "drop") {
+        if (envelope.reason === "invalid_ws_frame_shape") {
+          dropsInvalidWsFrameShape += 1;
+        } else if (envelope.reason === "invalid_event_frame_shape") {
+          dropsInvalidEventFrameShape += 1;
+        } else if (envelope.reason === "missing_event_object") {
+          dropsMissingEventObject += 1;
+        }
+        recordDropped(url, envelope.reason, "relay_fault", nowMs);
         maybeLogDrop({
           msg: "event_dropped_relay_fault",
-          reason: "invalid_message_envelope",
+          reason: envelope.reason,
           pubkey: undefined,
           eventId: undefined,
           relay: url,
         });
         return;
       }
-      if (msg[0] === "EVENT") {
-        if (msg.length < 3 || !msg[2] || typeof msg[2] !== "object") {
-          recordDropped(url, "invalid_event_frame", "relay_fault", nowMs);
-          maybeLogDrop({
-            msg: "event_dropped_relay_fault",
-            reason: "invalid_event_frame",
-            pubkey: undefined,
-            eventId: undefined,
-            relay: url,
-          });
-          return;
-        }
-        const event = msg[2];
+      if (envelope.kind === "event") {
+        const event = envelope.event;
         const stats = getRelayStats(url);
         refreshRelayHealthWindow(stats, nowMs);
         const prefilter = shouldProcessEvent(event);
@@ -586,8 +623,16 @@ function connect(url: string) {
     } catch (e: any) {
       if (!parsed) {
         eventsParsedFail += 1;
+        dropsInvalidWsJson += 1;
         const nowMs = Date.now();
-        recordDropped(url, "relay_message_parse_error", "relay_fault", nowMs);
+        recordDropped(url, "invalid_ws_json", "relay_fault", nowMs);
+        maybeLogDrop({
+          msg: "event_dropped_relay_fault",
+          reason: "invalid_ws_json",
+          pubkey: undefined,
+          eventId: undefined,
+          relay: url,
+        });
       } else {
         log("error", "relay_message_handler_error", {
           relay: url,
@@ -595,11 +640,7 @@ function connect(url: string) {
         });
         return;
       }
-      log("error", "relay_message_parse_error", {
-        relay: url,
-        error: e?.message || String(e),
-        raw: String(data).slice(0, 300),
-      });
+      return;
     }
   });
 
