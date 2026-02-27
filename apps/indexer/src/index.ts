@@ -586,6 +586,7 @@ function maybeLogDrop(opts: {
     reason === "relay_quarantined" ||
     reason === "relay_rate_limited" ||
     reason === "verification_budget_exhausted" ||
+    reason === "duplicate_event_id" ||
     reason === "sigverify_budget_exhausted" ||
     reason === "sigverify_invalid_id" ||
     reason === "sigverify_invalid_sig" ||
