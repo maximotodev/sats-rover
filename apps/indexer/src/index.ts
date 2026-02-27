@@ -26,6 +26,10 @@ const GLOBAL_BUDGET_BURST_TOKENS = 400;
 const RELAY_WINDOW_MS = 10_000;
 const RELAY_MAX_EVENTS_PER_WINDOW = 120;
 const RELAY_LIMITER_MAX_KEYS = 2000;
+const RELAY_HEALTH_WINDOW_MS = 60_000;
+const RELAY_HEALTH_MIN_SAMPLE = 200;
+const RELAY_HEALTH_DROP_RATIO_THRESHOLD = 0.9;
+const RELAY_QUARANTINE_MS = 5 * 60_000;
 
 const dropLogDedupe = new Set<string>();
 const pubkeyLimiter = new Map<
@@ -45,6 +49,10 @@ type RelayStats = {
   rateLimited: number;
   pubkeyLimited: number;
   budgetDropped: number;
+  windowStartMs: number;
+  acceptedInWindow: number;
+  droppedInWindow: number;
+  quarantinedUntilMs: number;
   droppedByReason: Record<string, number>;
 };
 const relayStats = new Map<string, RelayStats>();
@@ -85,21 +93,54 @@ function getRelayStats(relay: string): RelayStats {
     rateLimited: 0,
     pubkeyLimited: 0,
     budgetDropped: 0,
+    windowStartMs: Date.now(),
+    acceptedInWindow: 0,
+    droppedInWindow: 0,
+    quarantinedUntilMs: 0,
     droppedByReason: {},
   };
   relayStats.set(relay, created);
   return created;
 }
 
-function recordDropped(relay: string, reason: string): void {
-  const stats = getRelayStats(relay);
-  stats.dropped += 1;
-  stats.droppedByReason[reason] = (stats.droppedByReason[reason] || 0) + 1;
+function refreshRelayHealthWindow(stats: RelayStats, nowMs: number): void {
+  if (nowMs - stats.windowStartMs < RELAY_HEALTH_WINDOW_MS) return;
+  stats.windowStartMs = nowMs;
+  stats.acceptedInWindow = 0;
+  stats.droppedInWindow = 0;
 }
 
-function recordAccepted(relay: string): void {
+function maybeActivateRelayQuarantine(relay: string, stats: RelayStats, nowMs: number): void {
+  if (stats.quarantinedUntilMs > nowMs) return;
+  const sample = stats.acceptedInWindow + stats.droppedInWindow;
+  if (sample < RELAY_HEALTH_MIN_SAMPLE) return;
+  const dropRatio = stats.droppedInWindow / sample;
+  if (dropRatio < RELAY_HEALTH_DROP_RATIO_THRESHOLD) return;
+
+  stats.quarantinedUntilMs = nowMs + RELAY_QUARANTINE_MS;
+  log("warn", "relay_quarantine_activated", {
+    relay,
+    sample,
+    dropRatio: Math.round(dropRatio * 1000) / 1000,
+    quarantinedUntilMs: stats.quarantinedUntilMs,
+  });
+}
+
+function recordDropped(relay: string, reason: string, nowMs = Date.now()): void {
   const stats = getRelayStats(relay);
+  refreshRelayHealthWindow(stats, nowMs);
+  stats.dropped += 1;
+  stats.droppedInWindow += 1;
+  stats.droppedByReason[reason] = (stats.droppedByReason[reason] || 0) + 1;
+  maybeActivateRelayQuarantine(relay, stats, nowMs);
+}
+
+function recordAccepted(relay: string, nowMs = Date.now()): void {
+  const stats = getRelayStats(relay);
+  refreshRelayHealthWindow(stats, nowMs);
   stats.accepted += 1;
+  stats.acceptedInWindow += 1;
+  maybeActivateRelayQuarantine(relay, stats, nowMs);
 }
 
 function refillGlobalTokens(nowMs: number): void {
@@ -240,7 +281,12 @@ function maybeLogDrop(opts: {
   relay: string;
 }): void {
   const { msg, reason, pubkey, eventId, relay } = opts;
-  const dedupeKey = `${msg}:${reason}:${pubkey || "unknown"}`;
+  const dedupeKey =
+    reason === "relay_quarantined" ||
+    reason === "relay_rate_limited" ||
+    reason === "verification_budget_exhausted"
+      ? `${msg}:${reason}:${relay}`
+      : `${msg}:${reason}:${pubkey || "unknown"}`;
   if (!rememberDropLogKey(dedupeKey)) return;
   log("warn", msg, {
     reason,
@@ -255,6 +301,8 @@ function startStatsTimerIfNeeded(): void {
   statsTimerStarted = true;
   setInterval(() => {
     for (const [relay, stats] of relayStats.entries()) {
+      const sample = stats.acceptedInWindow + stats.droppedInWindow;
+      const dropRatio = sample > 0 ? stats.droppedInWindow / sample : 0;
       log("info", "relay_ingest_stats", {
         relay,
         accepted: stats.accepted,
@@ -262,6 +310,15 @@ function startStatsTimerIfNeeded(): void {
         rateLimited: stats.rateLimited,
         pubkeyLimited: stats.pubkeyLimited,
         budgetDropped: stats.budgetDropped,
+        acceptedInWindow: stats.acceptedInWindow,
+        droppedInWindow: stats.droppedInWindow,
+        dropRatio: Math.round(dropRatio * 1000) / 1000,
+        quarantinedUntilMs:
+          stats.quarantinedUntilMs > 0 ? stats.quarantinedUntilMs : null,
+        quarantinedUntilIso:
+          stats.quarantinedUntilMs > 0
+            ? new Date(stats.quarantinedUntilMs).toISOString()
+            : null,
         droppedByReason: stats.droppedByReason,
       });
     }
@@ -309,10 +366,24 @@ function connect(url: string) {
         }
 
         const nowMs = Date.now();
+        const stats = getRelayStats(url);
+        refreshRelayHealthWindow(stats, nowMs);
+        if (stats.quarantinedUntilMs > nowMs) {
+          const reason = "relay_quarantined";
+          recordDropped(url, reason, nowMs);
+          maybeLogDrop({
+            msg: "event_dropped_rate_limited",
+            reason,
+            pubkey: prefilter.pubkey,
+            eventId: prefilter.eventId,
+            relay: url,
+          });
+          return;
+        }
         if (!isRelayWithinRateLimit(url, nowMs)) {
           const reason = "relay_rate_limited";
-          recordDropped(url, reason);
-          getRelayStats(url).rateLimited += 1;
+          recordDropped(url, reason, nowMs);
+          stats.rateLimited += 1;
           maybeLogDrop({
             msg: "event_dropped_rate_limited",
             reason,
@@ -324,8 +395,8 @@ function connect(url: string) {
         }
         if (!isPubkeyWithinRateLimit(prefilter.pubkey!, nowMs)) {
           const reason = "pubkey_rate_limited";
-          recordDropped(url, reason);
-          getRelayStats(url).pubkeyLimited += 1;
+          recordDropped(url, reason, nowMs);
+          stats.pubkeyLimited += 1;
           maybeLogDrop({
             msg: "event_dropped_rate_limited",
             reason,
@@ -337,8 +408,8 @@ function connect(url: string) {
         }
         if (!tryConsumeGlobalToken(nowMs)) {
           const reason = "verification_budget_exhausted";
-          recordDropped(url, reason);
-          getRelayStats(url).budgetDropped += 1;
+          recordDropped(url, reason, nowMs);
+          stats.budgetDropped += 1;
           maybeLogDrop({
             msg: "event_dropped_budget",
             reason,
@@ -349,7 +420,7 @@ function connect(url: string) {
           return;
         }
 
-        recordAccepted(url);
+        recordAccepted(url, nowMs);
         const result = await processSatsRoverEvent(pool, event);
         if (result) {
           log("info", "signal_ingested", {
