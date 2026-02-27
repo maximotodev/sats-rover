@@ -76,6 +76,7 @@ let dropsCreatedAtOutOfRange = 0;
 let dropsInvalidTagsShape = 0;
 let dropsTagValueTooLong = 0;
 let dropsTagsScanLimitExceeded = 0;
+let dropsMissingSig = 0;
 let dropsInvalidSigHex = 0;
 let verificationGatePassed = 0;
 let expensivePathAttempts = 0;
@@ -492,7 +493,10 @@ function passesSignaturePrereqGate(
   event: any,
 ): { ok: true } | { ok: false; reason: string } {
   const sig = event?.sig;
-  if (typeof sig !== "string" || !isHex128(sig)) {
+  if (typeof sig !== "string") {
+    return { ok: false, reason: "missing_sig" };
+  }
+  if (!isHex128(sig)) {
     return { ok: false, reason: "invalid_sig_hex" };
   }
   return { ok: true };
@@ -614,6 +618,7 @@ function startStatsTimerIfNeeded(): void {
       dropsInvalidTagsShape,
       dropsTagValueTooLong,
       dropsTagsScanLimitExceeded,
+      dropsMissingSig,
       dropsInvalidSigHex,
       verificationGatePassed,
       expensivePathAttempts,
@@ -735,6 +740,7 @@ function connect(url: string) {
         const sigGate = passesSignaturePrereqGate(event);
         if (!sigGate.ok) {
           const reason = sigGate.reason;
+          if (reason === "missing_sig") dropsMissingSig += 1;
           if (reason === "invalid_sig_hex") dropsInvalidSigHex += 1;
           recordDropped(url, reason, "guard", nowMs);
           maybeLogDrop({
