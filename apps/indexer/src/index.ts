@@ -11,7 +11,8 @@ const RELAYS = [
   "wss://nos.lol",
 ];
 const pool = new Pool({
-  connectionString: process.env.INDEXER_DATABASE_URL || process.env.DATABASE_URL,
+  connectionString:
+    process.env.INDEXER_DATABASE_URL || process.env.DATABASE_URL,
 });
 const PREFILTER_MAX_PLACE_ID_LENGTH = 200;
 const PREFILTER_MAX_CONTENT_BYTES = 8 * 1024;
@@ -20,21 +21,39 @@ const DROP_LOG_DEDUPE_MAX_KEYS = 5000;
 const PUBKEY_WINDOW_MS = 60_000;
 const PUBKEY_MAX_EVENTS_PER_WINDOW = 30;
 const PUBKEY_LIMITER_MAX_KEYS = 20_000;
-const GLOBAL_VERIFICATION_BUDGET_PER_SECOND = 200;
+const GLOBAL_BUDGET_TOKENS_PER_SEC = 200;
+const GLOBAL_BUDGET_BURST_TOKENS = 400;
+const RELAY_WINDOW_MS = 10_000;
+const RELAY_MAX_EVENTS_PER_WINDOW = 120;
+const RELAY_LIMITER_MAX_KEYS = 2000;
 
 const dropLogDedupe = new Set<string>();
-const pubkeyLimiter = new Map<string, { windowStartMs: number; count: number }>();
-let budgetSecond = Math.floor(Date.now() / 1000);
-let budgetUsedInSecond = 0;
+const pubkeyLimiter = new Map<
+  string,
+  { windowStartMs: number; count: number }
+>();
+const relayLimiter = new Map<string, { windowStartMs: number; count: number }>();
+let globalTokens = GLOBAL_BUDGET_BURST_TOKENS;
+let globalLastRefillMs = Date.now();
+let budgetTokenDrops = 0;
+let budgetTokenConsumes = 0;
+let statsTimerStarted = false;
 
 type RelayStats = {
   accepted: number;
   dropped: number;
+  rateLimited: number;
+  pubkeyLimited: number;
+  budgetDropped: number;
   droppedByReason: Record<string, number>;
 };
 const relayStats = new Map<string, RelayStats>();
 
-function log(level: "info" | "warn" | "error", msg: string, ctx: Record<string, unknown> = {}) {
+function log(
+  level: "info" | "warn" | "error",
+  msg: string,
+  ctx: Record<string, unknown> = {},
+) {
   const payload = {
     ts: new Date().toISOString(),
     level,
@@ -60,7 +79,14 @@ function rememberDropLogKey(key: string): boolean {
 function getRelayStats(relay: string): RelayStats {
   const existing = relayStats.get(relay);
   if (existing) return existing;
-  const created: RelayStats = { accepted: 0, dropped: 0, droppedByReason: {} };
+  const created: RelayStats = {
+    accepted: 0,
+    dropped: 0,
+    rateLimited: 0,
+    pubkeyLimited: 0,
+    budgetDropped: 0,
+    droppedByReason: {},
+  };
   relayStats.set(relay, created);
   return created;
 }
@@ -76,14 +102,22 @@ function recordAccepted(relay: string): void {
   stats.accepted += 1;
 }
 
-function tryConsumeGlobalBudget(nowMs: number): boolean {
-  const second = Math.floor(nowMs / 1000);
-  if (second !== budgetSecond) {
-    budgetSecond = second;
-    budgetUsedInSecond = 0;
+function refillGlobalTokens(nowMs: number): void {
+  const elapsedMs = Math.max(0, nowMs - globalLastRefillMs);
+  globalLastRefillMs = nowMs;
+  if (elapsedMs === 0) return;
+  const tokensToAdd = (elapsedMs / 1000) * GLOBAL_BUDGET_TOKENS_PER_SEC;
+  globalTokens = Math.min(GLOBAL_BUDGET_BURST_TOKENS, globalTokens + tokensToAdd);
+}
+
+function tryConsumeGlobalToken(nowMs: number): boolean {
+  refillGlobalTokens(nowMs);
+  if (globalTokens < 1) {
+    budgetTokenDrops += 1;
+    return false;
   }
-  if (budgetUsedInSecond >= GLOBAL_VERIFICATION_BUDGET_PER_SECOND) return false;
-  budgetUsedInSecond += 1;
+  globalTokens -= 1;
+  budgetTokenConsumes += 1;
   return true;
 }
 
@@ -107,6 +141,32 @@ function isPubkeyWithinRateLimit(pubkey: string, nowMs: number): boolean {
     return true;
   }
   if (current.count >= PUBKEY_MAX_EVENTS_PER_WINDOW) {
+    return false;
+  }
+  current.count += 1;
+  return true;
+}
+
+function sweepRelayLimiter(nowMs: number): void {
+  if (relayLimiter.size < RELAY_LIMITER_MAX_KEYS) return;
+  for (const [key, state] of relayLimiter.entries()) {
+    if (nowMs - state.windowStartMs >= RELAY_WINDOW_MS) {
+      relayLimiter.delete(key);
+    }
+  }
+  if (relayLimiter.size >= RELAY_LIMITER_MAX_KEYS) {
+    relayLimiter.clear();
+  }
+}
+
+function isRelayWithinRateLimit(relay: string, nowMs: number): boolean {
+  sweepRelayLimiter(nowMs);
+  const current = relayLimiter.get(relay);
+  if (!current || nowMs - current.windowStartMs >= RELAY_WINDOW_MS) {
+    relayLimiter.set(relay, { windowStartMs: nowMs, count: 1 });
+    return true;
+  }
+  if (current.count >= RELAY_MAX_EVENTS_PER_WINDOW) {
     return false;
   }
   current.count += 1;
@@ -141,7 +201,11 @@ function shouldProcessEvent(event: any): {
 
   let placeValue: string | null = null;
   for (const tag of tags) {
-    if (Array.isArray(tag) && tag[0] === "place" && typeof tag[1] === "string") {
+    if (
+      Array.isArray(tag) &&
+      tag[0] === "place" &&
+      typeof tag[1] === "string"
+    ) {
       placeValue = tag[1];
       break;
     }
@@ -166,7 +230,10 @@ function shouldProcessEvent(event: any): {
 }
 
 function maybeLogDrop(opts: {
-  msg: "event_dropped_prefilter" | "event_dropped_rate_limited" | "event_dropped_budget";
+  msg:
+    | "event_dropped_prefilter"
+    | "event_dropped_rate_limited"
+    | "event_dropped_budget";
   reason: string;
   pubkey: string | undefined;
   eventId: string | undefined;
@@ -181,6 +248,31 @@ function maybeLogDrop(opts: {
     eventId: eventId || "unknown",
     relay,
   });
+}
+
+function startStatsTimerIfNeeded(): void {
+  if (statsTimerStarted) return;
+  statsTimerStarted = true;
+  setInterval(() => {
+    for (const [relay, stats] of relayStats.entries()) {
+      log("info", "relay_ingest_stats", {
+        relay,
+        accepted: stats.accepted,
+        dropped: stats.dropped,
+        rateLimited: stats.rateLimited,
+        pubkeyLimited: stats.pubkeyLimited,
+        budgetDropped: stats.budgetDropped,
+        droppedByReason: stats.droppedByReason,
+      });
+    }
+    log("info", "global_budget_stats", {
+      tokens: Math.round(globalTokens),
+      consumes: budgetTokenConsumes,
+      drops: budgetTokenDrops,
+      tokensPerSec: GLOBAL_BUDGET_TOKENS_PER_SEC,
+      burstTokens: GLOBAL_BUDGET_BURST_TOKENS,
+    });
+  }, 60_000);
 }
 
 function connect(url: string) {
@@ -217,9 +309,10 @@ function connect(url: string) {
         }
 
         const nowMs = Date.now();
-        if (!isPubkeyWithinRateLimit(prefilter.pubkey!, nowMs)) {
-          const reason = "pubkey_rate_limited";
+        if (!isRelayWithinRateLimit(url, nowMs)) {
+          const reason = "relay_rate_limited";
           recordDropped(url, reason);
+          getRelayStats(url).rateLimited += 1;
           maybeLogDrop({
             msg: "event_dropped_rate_limited",
             reason,
@@ -229,9 +322,23 @@ function connect(url: string) {
           });
           return;
         }
-        if (!tryConsumeGlobalBudget(nowMs)) {
+        if (!isPubkeyWithinRateLimit(prefilter.pubkey!, nowMs)) {
+          const reason = "pubkey_rate_limited";
+          recordDropped(url, reason);
+          getRelayStats(url).pubkeyLimited += 1;
+          maybeLogDrop({
+            msg: "event_dropped_rate_limited",
+            reason,
+            pubkey: prefilter.pubkey,
+            eventId: prefilter.eventId,
+            relay: url,
+          });
+          return;
+        }
+        if (!tryConsumeGlobalToken(nowMs)) {
           const reason = "verification_budget_exhausted";
           recordDropped(url, reason);
+          getRelayStats(url).budgetDropped += 1;
           maybeLogDrop({
             msg: "event_dropped_budget",
             reason,
@@ -267,19 +374,13 @@ function connect(url: string) {
   });
 
   ws.on("error", (err: any) =>
-    log("error", "relay_error", { relay: url, error: err?.message || String(err) }),
+    log("error", "relay_error", {
+      relay: url,
+      error: err?.message || String(err),
+    }),
   );
 }
 
 log("info", "indexer_start", { relayCount: RELAYS.length });
-setInterval(() => {
-  for (const [relay, stats] of relayStats.entries()) {
-    log("info", "relay_ingest_stats", {
-      relay,
-      accepted: stats.accepted,
-      dropped: stats.dropped,
-      droppedByReason: stats.droppedByReason,
-    });
-  }
-}, 60_000);
+startStatsTimerIfNeeded();
 RELAYS.forEach(connect);
