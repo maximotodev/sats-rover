@@ -30,6 +30,9 @@ const RELAY_HEALTH_WINDOW_MS = 60_000;
 const RELAY_HEALTH_MIN_SAMPLE = 200;
 const RELAY_HEALTH_DROP_RATIO_THRESHOLD = 0.9;
 const RELAY_QUARANTINE_MS = 5 * 60_000;
+const SEEN_EVENT_TTL_MS = 10 * 60_000;
+const SEEN_EVENT_MAX_KEYS = 200_000;
+const SEEN_EVENT_SWEEP_INTERVAL = 1000;
 
 const dropLogDedupe = new Set<string>();
 const pubkeyLimiter = new Map<
@@ -37,6 +40,7 @@ const pubkeyLimiter = new Map<
   { windowStartMs: number; count: number }
 >();
 const relayLimiter = new Map<string, { windowStartMs: number; count: number }>();
+const seenEventIds = new Map<string, number>();
 let globalTokens = GLOBAL_BUDGET_BURST_TOKENS;
 let globalLastRefillMs = Date.now();
 let budgetTokenDrops = 0;
@@ -51,6 +55,8 @@ let dropsMissingPlace = 0;
 let dropsPlaceTooLong = 0;
 let dropsTooManyTags = 0;
 let dropsContentTooLarge = 0;
+let dropsDuplicateEventId = 0;
+let seenEventSweepTick = 0;
 
 type RelayStats = {
   accepted: number;
@@ -241,6 +247,38 @@ function isRelayWithinRateLimit(relay: string, nowMs: number): boolean {
   return true;
 }
 
+function sweepSeenEventIds(nowMs: number): void {
+  for (const [eventId, seenAt] of seenEventIds.entries()) {
+    if (nowMs - seenAt >= SEEN_EVENT_TTL_MS) {
+      seenEventIds.delete(eventId);
+    }
+  }
+  if (seenEventIds.size > SEEN_EVENT_MAX_KEYS) {
+    seenEventIds.clear();
+  }
+}
+
+function isDuplicateEventId(eventId: string, nowMs: number): boolean {
+  seenEventSweepTick += 1;
+  if (
+    seenEventIds.size >= SEEN_EVENT_MAX_KEYS ||
+    seenEventSweepTick % SEEN_EVENT_SWEEP_INTERVAL === 0
+  ) {
+    sweepSeenEventIds(nowMs);
+  }
+
+  const seenAt = seenEventIds.get(eventId);
+  if (typeof seenAt === "number") {
+    if (nowMs - seenAt < SEEN_EVENT_TTL_MS) {
+      return true;
+    }
+    seenEventIds.set(eventId, nowMs);
+    return false;
+  }
+  seenEventIds.set(eventId, nowMs);
+  return false;
+}
+
 function isHex64(value: string): boolean {
   if (value.length !== 64) return false;
   for (let i = 0; i < 64; i += 1) {
@@ -395,6 +433,7 @@ function startStatsTimerIfNeeded(): void {
       dropsPlaceTooLong,
       dropsTooManyTags,
       dropsContentTooLarge,
+      dropsDuplicateEventId,
     });
   }, 60_000);
 }
@@ -458,6 +497,19 @@ function connect(url: string) {
           if (reason === "place_tag_too_long") dropsPlaceTooLong += 1;
           if (reason === "too_many_tags") dropsTooManyTags += 1;
           if (reason === "content_too_large") dropsContentTooLarge += 1;
+          recordDropped(url, reason, "guard", nowMs);
+          maybeLogDrop({
+            msg: "event_dropped_prefilter",
+            reason,
+            pubkey: prefilter.pubkey,
+            eventId: prefilter.eventId,
+            relay: url,
+          });
+          return;
+        }
+        if (isDuplicateEventId(prefilter.eventId!, nowMs)) {
+          const reason = "duplicate_event_id";
+          dropsDuplicateEventId += 1;
           recordDropped(url, reason, "guard", nowMs);
           maybeLogDrop({
             msg: "event_dropped_prefilter",
