@@ -1,6 +1,7 @@
 // apps/indexer/src/importer.ts
 import { Pool } from "pg";
 import { verifyEvent, type Event } from "nostr-tools";
+import { dbConflictTotal } from "./metrics.js";
 
 const CANONICAL_PLACE_ID =
   /^(osm:(node|way|relation):\d+|btcmap:[a-zA-Z0-9:_-]+|manual:[a-zA-Z0-9_-]+|sr:[a-zA-Z0-9:_-]+)$/;
@@ -229,6 +230,7 @@ export async function processSatsRoverEvent(pool: Pool, event: Event) {
     return null;
   } catch (err: any) {
     if (err.code === "23505") {
+      dbConflictTotal.labels("pubkey_place_day").inc();
       log("warn", "signal_duplicate_ignored", {
         eventId: event?.id,
       });

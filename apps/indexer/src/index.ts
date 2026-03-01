@@ -3,7 +3,15 @@ import { Pool } from "pg";
 import dotenv from "dotenv";
 import { getEventHash, verifyEvent } from "nostr-tools";
 import { processSatsRoverEvent } from "./importer.js";
-import { startMetricsServer } from "./metrics.js";
+import {
+  dbConflictTotal,
+  eventsAcceptedTotal,
+  eventsReceivedTotal,
+  eventsRejectedTotal,
+  relayConnected,
+  startMetricsServer,
+  wsReconnectTotal,
+} from "./metrics.js";
 
 dotenv.config();
 
@@ -608,6 +616,27 @@ function maybeLogDrop(opts: {
   });
 }
 
+function getEventKindLabel(event: any): string {
+  const kind = event?.kind;
+  if (typeof kind === "number" && Number.isFinite(kind) && Number.isInteger(kind)) {
+    return String(kind);
+  }
+  return "missing";
+}
+
+function getEventVersionLabel(event: any): string {
+  const tags = event?.tags;
+  if (!Array.isArray(tags)) return "missing";
+  for (const tag of tags) {
+    if (Array.isArray(tag) && tag[0] === "v" && typeof tag[1] === "string") {
+      if (tag[1] === "1") return "1";
+      if (tag[1] === "2") return "2";
+      return "other";
+    }
+  }
+  return "missing";
+}
+
 function startStatsTimerIfNeeded(): void {
   if (statsTimerStarted) return;
   statsTimerStarted = true;
@@ -689,6 +718,7 @@ function connect(url: string) {
   const ws = new WebSocket(url);
 
   ws.on("open", () => {
+    relayConnected.labels(url).set(1);
     log("info", "relay_connected", { relay: url });
     ws.send(
       JSON.stringify([
@@ -712,6 +742,7 @@ function connect(url: string) {
         return;
       }
       if (envelope.kind === "drop") {
+        eventsRejectedTotal.labels(envelope.reason, "missing", "missing").inc();
         if (envelope.reason === "invalid_ws_frame_shape") {
           dropsInvalidWsFrameShape += 1;
         } else if (envelope.reason === "invalid_event_frame_shape") {
@@ -731,11 +762,17 @@ function connect(url: string) {
       }
       if (envelope.kind === "event") {
         const event = envelope.event;
+        const kindLabel = getEventKindLabel(event);
+        const versionLabel = getEventVersionLabel(event);
+        eventsReceivedTotal
+          .labels(url, kindLabel, versionLabel)
+          .inc();
         const stats = getRelayStats(url);
         refreshRelayHealthWindow(stats, nowMs);
         const prefilter = shouldProcessEvent(event);
         if (!prefilter.ok) {
           const reason = prefilter.reason || "prefilter_rejected";
+          eventsRejectedTotal.labels(reason, kindLabel, versionLabel).inc();
           if (reason === "invalid_event_id_hex") dropsInvalidIdHex += 1;
           if (reason === "invalid_pubkey_hex") dropsInvalidPubkeyHex += 1;
           if (reason === "missing_place_tag" || reason === "empty_place_tag") {
@@ -756,6 +793,8 @@ function connect(url: string) {
         }
         if (isDuplicateEventId(prefilter.eventId!, nowMs)) {
           const reason = "duplicate_event_id";
+          eventsRejectedTotal.labels(reason, kindLabel, versionLabel).inc();
+          dbConflictTotal.labels("duplicate_event_id").inc();
           dropsDuplicateEventId += 1;
           recordDropped(url, reason, "guard", nowMs);
           maybeLogDrop({
@@ -771,6 +810,7 @@ function connect(url: string) {
         const verificationGate = passesVerificationGate(event, nowSec);
         if (!verificationGate.ok) {
           const reason = verificationGate.reason;
+          eventsRejectedTotal.labels(reason, kindLabel, versionLabel).inc();
           if (reason === "invalid_kind") dropsInvalidKind += 1;
           else if (reason === "disallowed_kind") dropsDisallowedKind += 1;
           else if (reason === "invalid_created_at") dropsInvalidCreatedAt += 1;
@@ -797,6 +837,7 @@ function connect(url: string) {
         const sigGate = passesSignaturePrereqGate(event);
         if (!sigGate.ok) {
           const reason = sigGate.reason;
+          eventsRejectedTotal.labels(reason, kindLabel, versionLabel).inc();
           if (reason === "missing_sig") dropsMissingSig += 1;
           if (reason === "invalid_sig_hex") dropsInvalidSigHex += 1;
           recordDropped(url, reason, "guard", nowMs);
@@ -812,6 +853,7 @@ function connect(url: string) {
 
         if (stats.quarantinedUntilMs > nowMs) {
           const reason = "relay_quarantined";
+          eventsRejectedTotal.labels(reason, kindLabel, versionLabel).inc();
           recordDropped(url, reason, "guard", nowMs);
           maybeLogDrop({
             msg: "event_dropped_quarantined",
@@ -824,6 +866,7 @@ function connect(url: string) {
         }
         if (!isRelayWithinRateLimit(url, nowMs)) {
           const reason = "relay_rate_limited";
+          eventsRejectedTotal.labels(reason, kindLabel, versionLabel).inc();
           recordDropped(url, reason, "guard", nowMs);
           stats.rateLimited += 1;
           maybeLogDrop({
@@ -837,6 +880,7 @@ function connect(url: string) {
         }
         if (!isPubkeyWithinRateLimit(prefilter.pubkey!, nowMs)) {
           const reason = "pubkey_rate_limited";
+          eventsRejectedTotal.labels(reason, kindLabel, versionLabel).inc();
           recordDropped(url, reason, "guard", nowMs);
           stats.pubkeyLimited += 1;
           maybeLogDrop({
@@ -851,6 +895,7 @@ function connect(url: string) {
         expensivePathAttempts += 1;
         if (!tryConsumeGlobalToken(nowMs)) {
           const reason = "verification_budget_exhausted";
+          eventsRejectedTotal.labels(reason, kindLabel, versionLabel).inc();
           expensivePathSkippedByBudget += 1;
           recordDropped(url, reason, "guard", nowMs);
           stats.budgetDropped += 1;
@@ -866,6 +911,7 @@ function connect(url: string) {
         sigverifyAttempts += 1;
         if (!tryConsumeSigverifyToken(nowMs)) {
           const reason = "sigverify_budget_exhausted";
+          eventsRejectedTotal.labels(reason, kindLabel, versionLabel).inc();
           sigverifyBudgetDrops += 1;
           recordDropped(url, reason, "guard", nowMs);
           maybeLogDrop({
@@ -881,6 +927,7 @@ function connect(url: string) {
         const signatureVerification = verifyEventSignature(event);
         if (!signatureVerification.ok) {
           const reason = signatureVerification.reason;
+          eventsRejectedTotal.labels(reason, kindLabel, versionLabel).inc();
           if (reason === "sigverify_invalid_id") {
             sigverifyFailedInvalidId += 1;
           } else {
@@ -900,6 +947,7 @@ function connect(url: string) {
 
         expensivePathInvoked += 1;
         recordAccepted(url, nowMs);
+        eventsAcceptedTotal.labels(kindLabel, versionLabel).inc();
         const result = await processSatsRoverEvent(pool, event);
         if (result) {
           log("info", "signal_ingested", {
@@ -914,6 +962,7 @@ function connect(url: string) {
         eventsParsedFail += 1;
         dropsInvalidWsJson += 1;
         const nowMs = Date.now();
+        eventsRejectedTotal.labels("invalid_ws_json", "missing", "missing").inc();
         recordDropped(url, "invalid_ws_json", "relay_fault", nowMs);
         maybeLogDrop({
           msg: "event_dropped_relay_fault",
@@ -934,16 +983,19 @@ function connect(url: string) {
   });
 
   ws.on("close", () => {
+    relayConnected.labels(url).set(0);
+    wsReconnectTotal.labels(url).inc();
     log("warn", "relay_disconnected", { relay: url, retryInMs: 5000 });
     setTimeout(() => connect(url), 5000);
   });
 
-  ws.on("error", (err: any) =>
+  ws.on("error", (err: any) => {
+    relayConnected.labels(url).set(0);
     log("error", "relay_error", {
       relay: url,
       error: err?.message || String(err),
-    }),
-  );
+    });
+  });
 }
 
 log("info", "indexer_start", { relayCount: RELAYS.length });
