@@ -10,6 +10,8 @@ import {
   eventsRejectedTotal,
   relayConnected,
   startMetricsServer,
+  watermarkUpdatesTotal,
+  watermarkValue,
   wsReconnectTotal,
 } from "./metrics.js";
 
@@ -25,6 +27,10 @@ const pool = new Pool({
     process.env.INDEXER_DATABASE_URL || process.env.DATABASE_URL,
 });
 const METRICS_PORT = Number(process.env.METRICS_PORT || 9108);
+const SIGNALS_LANE = "signals";
+const SIGNALS_WATERMARK_KEY = "signals_max_created_at";
+const SINCE_BUFFER_SEC = 60;
+const RETENTION_SEC = 30 * 24 * 60 * 60;
 const PREFILTER_MAX_PLACE_ID_LENGTH = 200;
 const PREFILTER_MAX_CONTENT_BYTES = 8 * 1024;
 const PREFILTER_MAX_TAGS = 200;
@@ -120,6 +126,53 @@ type RelayStats = {
   droppedByReason: Record<string, number>;
 };
 const relayStats = new Map<string, RelayStats>();
+let cachedSignalsWatermarkSec = 0;
+
+async function ensureIngestionStateTable(pool: Pool): Promise<void> {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS ingestion_state (
+      key TEXT PRIMARY KEY,
+      value BIGINT NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `);
+}
+
+async function getWatermark(pool: Pool, key: string): Promise<number> {
+  const res = await pool.query<{ value: string | number }>(
+    "SELECT value FROM ingestion_state WHERE key = $1",
+    [key],
+  );
+  if (res.rowCount === 0) return 0;
+  const raw = res.rows[0]?.value;
+  const value = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.floor(value));
+}
+
+async function upsertWatermarkMonotonic(
+  pool: Pool,
+  key: string,
+  newValue: number,
+): Promise<void> {
+  await pool.query(
+    `
+      INSERT INTO ingestion_state(key, value)
+      VALUES ($1, $2)
+      ON CONFLICT (key) DO UPDATE
+      SET value = GREATEST(ingestion_state.value, EXCLUDED.value),
+          updated_at = now()
+    `,
+    [key, newValue],
+  );
+}
+
+function computeSinceCreatedAt(watermarkSec: number, nowSec: number): number {
+  const base = watermarkSec - SINCE_BUFFER_SEC;
+  const cap = nowSec - RETENTION_SEC;
+  const since = Math.max(base, cap);
+  return since < 0 ? 0 : since;
+}
 
 function log(
   level: "info" | "warn" | "error",
@@ -717,14 +770,28 @@ function startStatsTimerIfNeeded(): void {
 function connect(url: string) {
   const ws = new WebSocket(url);
 
-  ws.on("open", () => {
+  ws.on("open", async () => {
     relayConnected.labels(url).set(1);
+    const dbWatermark = await getWatermark(pool, SIGNALS_WATERMARK_KEY).catch(
+      () => cachedSignalsWatermarkSec,
+    );
+    if (dbWatermark > cachedSignalsWatermarkSec) {
+      cachedSignalsWatermarkSec = dbWatermark;
+    }
+    watermarkValue.labels(SIGNALS_LANE).set(cachedSignalsWatermarkSec);
+    const nowSec = Math.floor(Date.now() / 1000);
+    const sinceCreatedAt = computeSinceCreatedAt(cachedSignalsWatermarkSec, nowSec);
     log("info", "relay_connected", { relay: url });
+    log("info", "relay_subscribe", {
+      relay: url,
+      kinds: [30331],
+      since: sinceCreatedAt,
+    });
     ws.send(
       JSON.stringify([
         "REQ",
         "sr_live",
-        { kinds: [1, 30331], "#t": ["satsrover"] },
+        { kinds: [30331], "#t": ["satsrover"], since: sinceCreatedAt },
       ]),
     );
   });
@@ -949,6 +1016,20 @@ function connect(url: string) {
         recordAccepted(url, nowMs);
         eventsAcceptedTotal.labels(kindLabel, versionLabel).inc();
         const result = await processSatsRoverEvent(pool, event);
+        await upsertWatermarkMonotonic(
+          pool,
+          SIGNALS_WATERMARK_KEY,
+          event.created_at,
+        );
+        const previousWatermark = cachedSignalsWatermarkSec;
+        cachedSignalsWatermarkSec = Math.max(
+          cachedSignalsWatermarkSec,
+          event.created_at,
+        );
+        watermarkValue.labels(SIGNALS_LANE).set(cachedSignalsWatermarkSec);
+        if (cachedSignalsWatermarkSec > previousWatermark) {
+          watermarkUpdatesTotal.labels(SIGNALS_LANE).inc();
+        }
         if (result) {
           log("info", "signal_ingested", {
             relay: url,
@@ -1001,4 +1082,26 @@ function connect(url: string) {
 log("info", "indexer_start", { relayCount: RELAYS.length });
 startMetricsServer(METRICS_PORT);
 startStatsTimerIfNeeded();
-RELAYS.forEach(connect);
+// Delay relay connects until ingestion_state init attempt finishes to avoid
+// early watermark SELECT failures during startup.
+ensureIngestionStateTable(pool)
+  .then(() => getWatermark(pool, SIGNALS_WATERMARK_KEY))
+  .then((watermarkSec) => {
+    cachedSignalsWatermarkSec = watermarkSec;
+    watermarkValue.labels(SIGNALS_LANE).set(cachedSignalsWatermarkSec);
+    if (watermarkSec === 0) {
+      log("warn", "watermark_zero_after_init", {
+        key: SIGNALS_WATERMARK_KEY,
+      });
+    }
+  })
+  .catch((err: any) => {
+    log("error", "ingestion_state_init_failed", {
+      error: err?.message || String(err),
+    });
+    cachedSignalsWatermarkSec = 0;
+    watermarkValue.labels(SIGNALS_LANE).set(cachedSignalsWatermarkSec);
+  })
+  .finally(() => {
+    RELAYS.forEach(connect);
+  });
