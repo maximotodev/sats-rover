@@ -3,6 +3,7 @@ import { Pool } from "pg";
 import dotenv from "dotenv";
 import { getEventHash, verifyEvent } from "nostr-tools";
 import { processSatsRoverEvent } from "./importer.js";
+import { startMetricsServer } from "./metrics.js";
 
 dotenv.config();
 
@@ -15,6 +16,7 @@ const pool = new Pool({
   connectionString:
     process.env.INDEXER_DATABASE_URL || process.env.DATABASE_URL,
 });
+const METRICS_PORT = Number(process.env.METRICS_PORT || 9108);
 const PREFILTER_MAX_PLACE_ID_LENGTH = 200;
 const PREFILTER_MAX_CONTENT_BYTES = 8 * 1024;
 const PREFILTER_MAX_TAGS = 200;
@@ -945,5 +947,6 @@ function connect(url: string) {
 }
 
 log("info", "indexer_start", { relayCount: RELAYS.length });
+startMetricsServer(METRICS_PORT);
 startStatsTimerIfNeeded();
 RELAYS.forEach(connect);
