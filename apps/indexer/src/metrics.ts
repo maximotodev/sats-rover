@@ -87,6 +87,60 @@ export const watermarkUpdatesTotal = getOrCreateCounter(
   ["lane"],
 );
 
+export const v2SeenTotal = getOrCreateCounter(
+  "v2_seen_total",
+  "Total signals lane v2 events seen",
+  ["lane"],
+);
+
+export const v2SoftInvalidTotal = getOrCreateCounter(
+  "v2_soft_invalid_total",
+  "Total soft validation failures for signals lane v2 events",
+  ["lane", "reason"],
+);
+
+export const v2SoftUnknownTagTotal = getOrCreateCounter(
+  "v2_soft_unknown_tag_total",
+  "Total unknown tags seen on signals lane v2 events",
+  ["lane", "tag"],
+);
+
+export const claimsSeenTotal = getOrCreateCounter(
+  "claims_seen_total",
+  "Total claims lane events seen",
+  ["lane"],
+);
+
+export const claimsRejectedTotal = getOrCreateCounter(
+  "claims_rejected_total",
+  "Total claims lane events rejected by strict validation",
+  ["lane", "reason"],
+);
+
+export const claimsUpsertTotal = getOrCreateCounter(
+  "claims_upsert_total",
+  "Total claims lane reducer outcomes",
+  ["lane", "result"],
+);
+
+export const signalsV2SeenTotal = getOrCreateCounter(
+  "signals_v2_seen_total",
+  "Total signals lane v2 events seen",
+  ["lane"],
+);
+
+export const signalsV2RejectedTotal = getOrCreateCounter(
+  "signals_v2_rejected_total",
+  "Total signals lane v2 events rejected",
+  ["lane", "reason"],
+);
+
+export const signalsV2UpsertTotal = getOrCreateCounter(
+  "signals_v2_upsert_total",
+  "Total signals lane v2 reducer outcomes",
+  ["lane", "result"],
+);
+
 export function startMetricsServer(port: number): void {
   const server = http.createServer(async (req, res) => {
     if (req.url === "/metrics") {

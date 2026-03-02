@@ -5,11 +5,20 @@ import { getEventHash, verifyEvent } from "nostr-tools";
 import { processSatsRoverEvent } from "./importer.js";
 import {
   dbConflictTotal,
+  claimsRejectedTotal,
+  claimsSeenTotal,
+  claimsUpsertTotal,
   eventsAcceptedTotal,
   eventsReceivedTotal,
   eventsRejectedTotal,
   relayConnected,
+  signalsV2RejectedTotal,
+  signalsV2SeenTotal,
+  signalsV2UpsertTotal,
   startMetricsServer,
+  v2SeenTotal,
+  v2SoftInvalidTotal,
+  v2SoftUnknownTagTotal,
   watermarkUpdatesTotal,
   watermarkValue,
   wsReconnectTotal,
@@ -28,7 +37,9 @@ const pool = new Pool({
 });
 const METRICS_PORT = Number(process.env.METRICS_PORT || 9108);
 const SIGNALS_LANE = "signals";
+const CLAIMS_LANE = "claims";
 const SIGNALS_WATERMARK_KEY = "signals_max_created_at";
+const CLAIMS_WATERMARK_KEY = "claims_max_created_at";
 const SINCE_BUFFER_SEC = 60;
 const RETENTION_SEC = 30 * 24 * 60 * 60;
 const PREFILTER_MAX_PLACE_ID_LENGTH = 200;
@@ -59,6 +70,24 @@ const VERIFICATION_TAG_SCAN_LIMIT = 64;
 const MAX_CREATED_AT_FUTURE_SKEW_SEC = 10 * 60;
 const MAX_CREATED_AT_AGE_SEC = 30 * 24 * 60 * 60;
 const ALLOWED_EVENT_KINDS = new Set([1, 30331]);
+const SOFT_V2_ALLOWED_STATUS = new Set(["success", "failed", "did_not_try"]);
+const SOFT_V2_KNOWN_TAGS = new Set([
+  "t",
+  "v",
+  "place",
+  "status",
+  "g",
+  "client",
+  "amount_msat",
+  "zap",
+  "bolt11",
+]);
+const SOFT_V2_GEOHASH_CHARS = "0123456789bcdefghjkmnpqrstuvwxyz";
+const CLAIMS_KIND = 30078;
+const SIGNALS_KIND = 30331;
+const MAX_CLAIM_D_LENGTH = 240;
+const MAX_CLAIM_CONTENT_BYTES = 4096;
+const MAX_SIGNALS_V2_CONTENT_BYTES = 4096;
 
 const dropLogDedupe = new Set<string>();
 const pubkeyLimiter = new Map<
@@ -127,6 +156,7 @@ type RelayStats = {
 };
 const relayStats = new Map<string, RelayStats>();
 let cachedSignalsWatermarkSec = 0;
+let cachedClaimsWatermarkSec = 0;
 
 async function ensureIngestionStateTable(pool: Pool): Promise<void> {
   await pool.query(`
@@ -134,6 +164,61 @@ async function ensureIngestionStateTable(pool: Pool): Promise<void> {
       key TEXT PRIMARY KEY,
       value BIGINT NOT NULL,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `);
+}
+
+async function ensureClaimsTable(pool: Pool): Promise<void> {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS app_state_claims (
+      pubkey TEXT NOT NULL,
+      d TEXT NOT NULL,
+      place_id TEXT NOT NULL,
+      role TEXT NOT NULL,
+      created_at BIGINT NOT NULL,
+      event_id TEXT NOT NULL,
+      content TEXT NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY (pubkey, d)
+    )
+  `);
+}
+
+async function ensureSignalsV2Tables(pool: Pool): Promise<void> {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS signals_v2_events (
+      event_id TEXT PRIMARY KEY,
+      pubkey TEXT NOT NULL,
+      created_at BIGINT NOT NULL,
+      place_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      day_utc INTEGER NOT NULL,
+      g TEXT NULL,
+      client TEXT NULL,
+      amount_msat BIGINT NULL,
+      zap TEXT NULL,
+      bolt11 TEXT NULL,
+      content TEXT NOT NULL,
+      relay TEXT NULL,
+      inserted_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS signals_v2_state (
+      pubkey TEXT NOT NULL,
+      place_id TEXT NOT NULL,
+      day_utc INTEGER NOT NULL,
+      status TEXT NOT NULL,
+      created_at BIGINT NOT NULL,
+      event_id TEXT NOT NULL,
+      g TEXT NULL,
+      client TEXT NULL,
+      amount_msat BIGINT NULL,
+      zap TEXT NULL,
+      bolt11 TEXT NULL,
+      content TEXT NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY (pubkey, place_id, day_utc)
     )
   `);
 }
@@ -172,6 +257,468 @@ function computeSinceCreatedAt(watermarkSec: number, nowSec: number): number {
   const cap = nowSec - RETENTION_SEC;
   const since = Math.max(base, cap);
   return since < 0 ? 0 : since;
+}
+
+type ClaimsValidationResult =
+  | {
+      ok: true;
+      pubkey: string;
+      eventId: string;
+      createdAt: number;
+      d: string;
+      placeId: string;
+      role: string;
+      content: string;
+    }
+  | { ok: false; reason: string; eventId?: string };
+
+function validateClaimsEventStrict(event: any, nowSec: number): ClaimsValidationResult {
+  if (!event || typeof event !== "object") {
+    return { ok: false, reason: "invalid_event_shape" };
+  }
+  if (event.kind !== CLAIMS_KIND) {
+    return { ok: false, reason: "invalid_kind" };
+  }
+  if (typeof event.id !== "string" || !isHex64(event.id)) {
+    return { ok: false, reason: "invalid_event_id_hex" };
+  }
+  if (typeof event.pubkey !== "string" || !isHex64(event.pubkey)) {
+    return { ok: false, reason: "invalid_pubkey_hex", eventId: event.id };
+  }
+  if (
+    typeof event.created_at !== "number" ||
+    !Number.isFinite(event.created_at) ||
+    !Number.isInteger(event.created_at)
+  ) {
+    return { ok: false, reason: "invalid_created_at", eventId: event.id };
+  }
+  if (event.created_at > nowSec + MAX_CREATED_AT_FUTURE_SKEW_SEC) {
+    return { ok: false, reason: "created_at_future_skew", eventId: event.id };
+  }
+  const content = typeof event.content === "string" ? event.content : "";
+  if (Buffer.byteLength(content, "utf8") > MAX_CLAIM_CONTENT_BYTES) {
+    return { ok: false, reason: "content_too_large", eventId: event.id };
+  }
+
+  const tags = event.tags;
+  if (!Array.isArray(tags)) {
+    return { ok: false, reason: "invalid_tags_shape", eventId: event.id };
+  }
+
+  let tCount = 0;
+  let vCount = 0;
+  let dCount = 0;
+  let placeCount = 0;
+  let roleCount = 0;
+  let tValue: string | null = null;
+  let vValue: string | null = null;
+  let dValue: string | null = null;
+  let placeValue: string | null = null;
+  let roleValue: string | null = null;
+
+  for (let i = 0; i < tags.length && i < VERIFICATION_TAG_SCAN_LIMIT; i += 1) {
+    const tag = tags[i];
+    if (!Array.isArray(tag) || typeof tag[0] !== "string") {
+      return { ok: false, reason: "invalid_tags_shape", eventId: event.id };
+    }
+    const tagName = tag[0];
+    if (tagName === "t") {
+      tCount += 1;
+      if (typeof tag[1] === "string") tValue = tag[1];
+      continue;
+    }
+    if (tagName === "v") {
+      vCount += 1;
+      if (typeof tag[1] === "string") vValue = tag[1];
+      continue;
+    }
+    if (tagName === "d") {
+      dCount += 1;
+      if (typeof tag[1] === "string") dValue = tag[1];
+      continue;
+    }
+    if (tagName === "place") {
+      placeCount += 1;
+      if (typeof tag[1] === "string") placeValue = tag[1];
+      continue;
+    }
+    if (tagName === "role") {
+      roleCount += 1;
+      if (typeof tag[1] === "string") roleValue = tag[1];
+      continue;
+    }
+  }
+
+  if (tCount === 0 || tValue !== "satsrover-claim") {
+    return { ok: false, reason: "missing_or_invalid_t", eventId: event.id };
+  }
+  if (vCount === 0 || vValue !== "2") {
+    return { ok: false, reason: "missing_or_invalid_v", eventId: event.id };
+  }
+  if (dCount === 0 || typeof dValue !== "string") {
+    return { ok: false, reason: "missing_or_invalid_d", eventId: event.id };
+  }
+  if (placeCount === 0 || typeof placeValue !== "string") {
+    return { ok: false, reason: "missing_or_invalid_place", eventId: event.id };
+  }
+  if (roleCount === 0 || roleValue !== "owner") {
+    return { ok: false, reason: "missing_or_invalid_role", eventId: event.id };
+  }
+  if (tCount > 1 || vCount > 1 || dCount > 1 || placeCount > 1 || roleCount > 1) {
+    return { ok: false, reason: "duplicate_required_tag", eventId: event.id };
+  }
+  if (dValue.length > MAX_CLAIM_D_LENGTH) {
+    return { ok: false, reason: "d_too_long", eventId: event.id };
+  }
+  if (placeValue.length > PREFILTER_MAX_PLACE_ID_LENGTH) {
+    return { ok: false, reason: "place_too_long", eventId: event.id };
+  }
+  if (!dValue.startsWith("claim:")) {
+    return { ok: false, reason: "invalid_d_prefix", eventId: event.id };
+  }
+  const dPlace = dValue.slice("claim:".length);
+  if (dPlace !== placeValue) {
+    return { ok: false, reason: "d_place_mismatch", eventId: event.id };
+  }
+
+  return {
+    ok: true,
+    pubkey: event.pubkey,
+    eventId: event.id,
+    createdAt: event.created_at,
+    d: dValue,
+    placeId: placeValue,
+    role: roleValue,
+    content,
+  };
+}
+
+async function reduceClaimEvent(
+  pool: Pool,
+  claim: {
+    pubkey: string;
+    d: string;
+    placeId: string;
+    role: string;
+    createdAt: number;
+    eventId: string;
+    content: string;
+  },
+): Promise<"inserted" | "updated" | "ignored"> {
+  const res = await pool.query<{ inserted: boolean }>(
+    `
+      INSERT INTO app_state_claims (
+        pubkey, d, place_id, role, created_at, event_id, content, updated_at
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+      ON CONFLICT (pubkey, d) DO UPDATE
+      SET
+        place_id = EXCLUDED.place_id,
+        role = EXCLUDED.role,
+        created_at = EXCLUDED.created_at,
+        event_id = EXCLUDED.event_id,
+        content = EXCLUDED.content,
+        updated_at = now()
+      WHERE
+        app_state_claims.created_at < EXCLUDED.created_at
+        OR (
+          app_state_claims.created_at = EXCLUDED.created_at
+          AND app_state_claims.event_id < EXCLUDED.event_id
+        )
+      RETURNING (xmax = 0) AS inserted
+    `,
+    [
+      claim.pubkey,
+      claim.d,
+      claim.placeId,
+      claim.role,
+      claim.createdAt,
+      claim.eventId,
+      claim.content,
+    ],
+  );
+  if (res.rowCount === 0) return "ignored";
+  return res.rows[0]?.inserted ? "inserted" : "updated";
+}
+
+type SignalsV2ParseResult =
+  | {
+      ok: true;
+      pubkey: string;
+      eventId: string;
+      createdAt: number;
+      placeId: string;
+      status: "success" | "failed" | "did_not_try";
+      dayUtc: number;
+      g: string | null;
+      client: string | null;
+      amountMsat: bigint | null;
+      zap: string | null;
+      bolt11: string | null;
+      content: string;
+    }
+  | { ok: false; reason: string; eventId?: string };
+
+function parseSignalsV2EventStrict(event: any, nowSec: number): SignalsV2ParseResult {
+  if (!event || typeof event !== "object") {
+    return { ok: false, reason: "invalid_event_shape" };
+  }
+  if (typeof event.id !== "string" || !isHex64(event.id)) {
+    return { ok: false, reason: "invalid_event_id_hex" };
+  }
+  if (typeof event.pubkey !== "string" || !isHex64(event.pubkey)) {
+    return { ok: false, reason: "invalid_pubkey_hex", eventId: event.id };
+  }
+  if (
+    typeof event.created_at !== "number" ||
+    !Number.isFinite(event.created_at) ||
+    !Number.isInteger(event.created_at)
+  ) {
+    return { ok: false, reason: "invalid_created_at", eventId: event.id };
+  }
+  if (event.created_at > nowSec + MAX_CREATED_AT_FUTURE_SKEW_SEC) {
+    return { ok: false, reason: "created_at_future_skew", eventId: event.id };
+  }
+  const content = typeof event.content === "string" ? event.content : "";
+  if (Buffer.byteLength(content, "utf8") > MAX_SIGNALS_V2_CONTENT_BYTES) {
+    return { ok: false, reason: "content_too_large", eventId: event.id };
+  }
+
+  const tags = event.tags;
+  if (!Array.isArray(tags)) {
+    return { ok: false, reason: "invalid_tags_shape", eventId: event.id };
+  }
+
+  let tCount = 0;
+  let vCount = 0;
+  let placeCount = 0;
+  let statusCount = 0;
+  let gCount = 0;
+  let clientCount = 0;
+  let amountMsatCount = 0;
+  let zapCount = 0;
+  let bolt11Count = 0;
+
+  let tValue: string | null = null;
+  let vValue: string | null = null;
+  let placeValue: string | null = null;
+  let statusValue: string | null = null;
+  let gValue: string | null = null;
+  let clientValue: string | null = null;
+  let amountMsatValue: bigint | null = null;
+  let zapValue: string | null = null;
+  let bolt11Value: string | null = null;
+
+  for (let i = 0; i < tags.length && i < VERIFICATION_TAG_SCAN_LIMIT; i += 1) {
+    const tag = tags[i];
+    if (!Array.isArray(tag) || typeof tag[0] !== "string") {
+      return { ok: false, reason: "invalid_tags_shape", eventId: event.id };
+    }
+    const tagName = tag[0];
+    const tagValue = typeof tag[1] === "string" ? tag[1] : null;
+
+    if (tagName === "t") {
+      tCount += 1;
+      tValue = tagValue;
+      continue;
+    }
+    if (tagName === "v") {
+      vCount += 1;
+      vValue = tagValue;
+      continue;
+    }
+    if (tagName === "place") {
+      placeCount += 1;
+      placeValue = tagValue;
+      continue;
+    }
+    if (tagName === "status") {
+      statusCount += 1;
+      statusValue = tagValue;
+      continue;
+    }
+    if (tagName === "g") {
+      gCount += 1;
+      if (typeof tagValue !== "string" || !isSoftV2Geohash(tagValue)) {
+        return { ok: false, reason: "invalid_g", eventId: event.id };
+      }
+      gValue = tagValue;
+      continue;
+    }
+    if (tagName === "client") {
+      clientCount += 1;
+      clientValue = tagValue;
+      continue;
+    }
+    if (tagName === "amount_msat") {
+      amountMsatCount += 1;
+      if (
+        typeof tagValue !== "string" ||
+        tagValue.length > 20 ||
+        !isDigitsOnly(tagValue)
+      ) {
+        return { ok: false, reason: "invalid_amount_msat", eventId: event.id };
+      }
+      try {
+        const parsedAmount = BigInt(tagValue);
+        if (parsedAmount < 0n || parsedAmount > 9223372036854775807n) {
+          return { ok: false, reason: "invalid_amount_msat", eventId: event.id };
+        }
+        amountMsatValue = parsedAmount;
+      } catch {
+        return { ok: false, reason: "invalid_amount_msat", eventId: event.id };
+      }
+      continue;
+    }
+    if (tagName === "zap") {
+      zapCount += 1;
+      if (typeof tagValue !== "string" || !isHex64(tagValue)) {
+        return { ok: false, reason: "invalid_zap", eventId: event.id };
+      }
+      zapValue = tagValue;
+      continue;
+    }
+    if (tagName === "bolt11") {
+      bolt11Count += 1;
+      if (typeof tagValue !== "string" || tagValue.length > 2000) {
+        return { ok: false, reason: "invalid_bolt11", eventId: event.id };
+      }
+      bolt11Value = tagValue;
+      continue;
+    }
+  }
+
+  if (tCount > 1 || vCount > 1 || placeCount > 1 || statusCount > 1) {
+    return { ok: false, reason: "duplicate_required_tag", eventId: event.id };
+  }
+  if (gCount > 1 || clientCount > 1 || amountMsatCount > 1 || zapCount > 1 || bolt11Count > 1) {
+    return { ok: false, reason: "duplicate_optional_tag", eventId: event.id };
+  }
+  if (tCount === 0 || tValue !== "satsrover") {
+    return { ok: false, reason: "missing_or_invalid_t", eventId: event.id };
+  }
+  if (vCount === 0 || vValue !== "2") {
+    return { ok: false, reason: "missing_or_invalid_v", eventId: event.id };
+  }
+  if (placeCount === 0 || typeof placeValue !== "string" || placeValue.length === 0) {
+    return { ok: false, reason: "missing_or_invalid_place", eventId: event.id };
+  }
+  if (statusCount === 0 || typeof statusValue !== "string") {
+    return { ok: false, reason: "missing_or_invalid_status", eventId: event.id };
+  }
+  if (statusValue !== "success" && statusValue !== "failed" && statusValue !== "did_not_try") {
+    return { ok: false, reason: "invalid_status", eventId: event.id };
+  }
+  if (placeValue.length > PREFILTER_MAX_PLACE_ID_LENGTH) {
+    return { ok: false, reason: "place_too_long", eventId: event.id };
+  }
+
+  return {
+    ok: true,
+    pubkey: event.pubkey,
+    eventId: event.id,
+    createdAt: event.created_at,
+    placeId: placeValue,
+    status: statusValue,
+    dayUtc: Math.floor(event.created_at / 86400),
+    g: gValue,
+    client: clientValue,
+    amountMsat: amountMsatValue,
+    zap: zapValue,
+    bolt11: bolt11Value,
+    content,
+  };
+}
+
+async function reduceSignalsV2Event(
+  pool: Pool,
+  relay: string,
+  parsed: {
+    pubkey: string;
+    eventId: string;
+    createdAt: number;
+    placeId: string;
+    status: "success" | "failed" | "did_not_try";
+    dayUtc: number;
+    g: string | null;
+    client: string | null;
+    amountMsat: bigint | null;
+    zap: string | null;
+    bolt11: string | null;
+    content: string;
+  },
+): Promise<"inserted" | "updated" | "ignored"> {
+  await pool.query(
+    `
+      INSERT INTO signals_v2_events (
+        event_id, pubkey, created_at, place_id, status, day_utc, g, client,
+        amount_msat, zap, bolt11, content, relay
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+      ON CONFLICT (event_id) DO NOTHING
+    `,
+    [
+      parsed.eventId,
+      parsed.pubkey,
+      parsed.createdAt,
+      parsed.placeId,
+      parsed.status,
+      parsed.dayUtc,
+      parsed.g,
+      parsed.client,
+      parsed.amountMsat,
+      parsed.zap,
+      parsed.bolt11,
+      parsed.content,
+      relay,
+    ],
+  );
+
+  const reduced = await pool.query<{ inserted: boolean }>(
+    `
+      INSERT INTO signals_v2_state (
+        pubkey, place_id, day_utc, status, created_at, event_id, g, client,
+        amount_msat, zap, bolt11, content, updated_at
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
+      ON CONFLICT (pubkey, place_id, day_utc) DO UPDATE
+      SET
+        status = EXCLUDED.status,
+        created_at = EXCLUDED.created_at,
+        event_id = EXCLUDED.event_id,
+        g = EXCLUDED.g,
+        client = EXCLUDED.client,
+        amount_msat = EXCLUDED.amount_msat,
+        zap = EXCLUDED.zap,
+        bolt11 = EXCLUDED.bolt11,
+        content = EXCLUDED.content,
+        updated_at = now()
+      WHERE
+        signals_v2_state.created_at < EXCLUDED.created_at
+        OR (
+          signals_v2_state.created_at = EXCLUDED.created_at
+          AND signals_v2_state.event_id < EXCLUDED.event_id
+        )
+      RETURNING (xmax = 0) AS inserted
+    `,
+    [
+      parsed.pubkey,
+      parsed.placeId,
+      parsed.dayUtc,
+      parsed.status,
+      parsed.createdAt,
+      parsed.eventId,
+      parsed.g,
+      parsed.client,
+      parsed.amountMsat,
+      parsed.zap,
+      parsed.bolt11,
+      parsed.content,
+    ],
+  );
+
+  if (reduced.rowCount === 0) return "ignored";
+  return reduced.rows[0]?.inserted ? "inserted" : "updated";
 }
 
 function log(
@@ -690,6 +1237,154 @@ function getEventVersionLabel(event: any): string {
   return "missing";
 }
 
+function normalizeSoftV2UnknownTag(tagName: string): string {
+  if (
+    tagName === "t" ||
+    tagName === "v" ||
+    tagName === "place" ||
+    tagName === "status" ||
+    tagName === "g" ||
+    tagName === "client" ||
+    tagName === "amount_msat" ||
+    tagName === "zap" ||
+    tagName === "bolt11"
+  ) {
+    return tagName;
+  }
+  return "other";
+}
+
+function isSoftV2Geohash(value: string): boolean {
+  if (value.length < 5 || value.length > 7) return false;
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i);
+    const lowerCode = code >= 65 && code <= 90 ? code + 32 : code;
+    const char = String.fromCharCode(lowerCode);
+    if (!SOFT_V2_GEOHASH_CHARS.includes(char)) return false;
+  }
+  return true;
+}
+
+function isDigitsOnly(value: string): boolean {
+  if (value.length === 0) return false;
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i);
+    if (code < 48 || code > 57) return false;
+  }
+  return true;
+}
+
+function validateSignalsV2Soft(event: any): {
+  firstReason?: string;
+  reasons: string[];
+  unknownTags: string[];
+} {
+  const tags = Array.isArray(event?.tags) ? event.tags : [];
+  const reasons: string[] = [];
+  const unknownTags: string[] = [];
+  let tCount = 0;
+  let vCount = 0;
+  let placeCount = 0;
+  let statusCount = 0;
+  let gCount = 0;
+  let clientCount = 0;
+  let amountMsatCount = 0;
+  let zapCount = 0;
+  let bolt11Count = 0;
+  let hasTSatsrover = false;
+  let hasV2 = false;
+  let hasPlace = false;
+  let hasStatus = false;
+
+  for (let i = 0; i < tags.length && i < VERIFICATION_TAG_SCAN_LIMIT; i += 1) {
+    const tag = tags[i];
+    if (!Array.isArray(tag) || typeof tag[0] !== "string") continue;
+    const tagName = tag[0];
+    const tagValue = typeof tag[1] === "string" ? tag[1] : "";
+
+    if (!SOFT_V2_KNOWN_TAGS.has(tagName)) {
+      unknownTags.push(normalizeSoftV2UnknownTag(tagName));
+      continue;
+    }
+
+    if (tagName === "t") {
+      tCount += 1;
+      if (tagValue === "satsrover") hasTSatsrover = true;
+      continue;
+    }
+    if (tagName === "v") {
+      vCount += 1;
+      if (tagValue === "2") hasV2 = true;
+      continue;
+    }
+    if (tagName === "place") {
+      placeCount += 1;
+      if (typeof tag[1] === "string" && tag[1].length > 0) hasPlace = true;
+      continue;
+    }
+    if (tagName === "status") {
+      statusCount += 1;
+      if (typeof tag[1] === "string" && tag[1].length > 0) hasStatus = true;
+      if (!SOFT_V2_ALLOWED_STATUS.has(tagValue)) {
+        reasons.push("invalid_status");
+      }
+      continue;
+    }
+    if (tagName === "g") {
+      gCount += 1;
+      if (typeof tag[1] !== "string" || !isSoftV2Geohash(tag[1])) {
+        reasons.push("invalid_g");
+      }
+      continue;
+    }
+    if (tagName === "client") {
+      clientCount += 1;
+      continue;
+    }
+    if (tagName === "amount_msat") {
+      amountMsatCount += 1;
+      if (
+        typeof tag[1] !== "string" ||
+        tag[1].length > 20 ||
+        !isDigitsOnly(tag[1])
+      ) {
+        reasons.push("invalid_amount_msat");
+      }
+      continue;
+    }
+    if (tagName === "zap") {
+      zapCount += 1;
+      if (typeof tag[1] !== "string" || !isHex64(tag[1])) {
+        reasons.push("invalid_zap");
+      }
+      continue;
+    }
+    if (tagName === "bolt11") {
+      bolt11Count += 1;
+      if (typeof tag[1] !== "string" || tag[1].length > 2000) {
+        reasons.push("invalid_bolt11");
+      }
+      continue;
+    }
+  }
+
+  if (!hasTSatsrover) reasons.push("missing_t_satsrover");
+  if (!hasV2) reasons.push("missing_v2");
+  if (!hasPlace) reasons.push("missing_place");
+  if (!hasStatus) reasons.push("missing_status");
+  if (tCount > 1) reasons.push("duplicate_t");
+  if (vCount > 1) reasons.push("duplicate_v");
+  if (placeCount > 1) reasons.push("duplicate_place");
+  if (statusCount > 1) reasons.push("duplicate_status");
+  if (gCount > 1) reasons.push("duplicate_g");
+  if (clientCount > 1) reasons.push("duplicate_client");
+  if (amountMsatCount > 1) reasons.push("duplicate_amount_msat");
+  if (zapCount > 1) reasons.push("duplicate_zap");
+  if (bolt11Count > 1) reasons.push("duplicate_bolt11");
+
+  return { firstReason: reasons[0], reasons, unknownTags };
+}
+
 function startStatsTimerIfNeeded(): void {
   if (statsTimerStarted) return;
   statsTimerStarted = true;
@@ -772,26 +1467,53 @@ function connect(url: string) {
 
   ws.on("open", async () => {
     relayConnected.labels(url).set(1);
-    const dbWatermark = await getWatermark(pool, SIGNALS_WATERMARK_KEY).catch(
+    const dbSignalsWatermark = await getWatermark(pool, SIGNALS_WATERMARK_KEY).catch(
       () => cachedSignalsWatermarkSec,
     );
-    if (dbWatermark > cachedSignalsWatermarkSec) {
-      cachedSignalsWatermarkSec = dbWatermark;
+    if (dbSignalsWatermark > cachedSignalsWatermarkSec) {
+      cachedSignalsWatermarkSec = dbSignalsWatermark;
+    }
+    const dbClaimsWatermark = await getWatermark(pool, CLAIMS_WATERMARK_KEY).catch(
+      () => cachedClaimsWatermarkSec,
+    );
+    if (dbClaimsWatermark > cachedClaimsWatermarkSec) {
+      cachedClaimsWatermarkSec = dbClaimsWatermark;
     }
     watermarkValue.labels(SIGNALS_LANE).set(cachedSignalsWatermarkSec);
+    watermarkValue.labels(CLAIMS_LANE).set(cachedClaimsWatermarkSec);
     const nowSec = Math.floor(Date.now() / 1000);
-    const sinceCreatedAt = computeSinceCreatedAt(cachedSignalsWatermarkSec, nowSec);
+    const signalsSinceCreatedAt = computeSinceCreatedAt(cachedSignalsWatermarkSec, nowSec);
+    const claimsSinceCreatedAt = computeSinceCreatedAt(cachedClaimsWatermarkSec, nowSec);
     log("info", "relay_connected", { relay: url });
     log("info", "relay_subscribe", {
       relay: url,
       kinds: [30331],
-      since: sinceCreatedAt,
+      since: signalsSinceCreatedAt,
     });
     ws.send(
       JSON.stringify([
         "REQ",
         "sr_live",
-        { kinds: [30331], "#t": ["satsrover"], since: sinceCreatedAt },
+        { kinds: [30331], "#t": ["satsrover"], since: signalsSinceCreatedAt },
+      ]),
+    );
+    log("info", "relay_subscribe", {
+      relay: url,
+      lane: CLAIMS_LANE,
+      sub: "sr_claims",
+      kinds: [CLAIMS_KIND],
+      since: claimsSinceCreatedAt,
+    });
+    ws.send(
+      JSON.stringify([
+        "REQ",
+        "sr_claims",
+        {
+          kinds: [CLAIMS_KIND],
+          "#t": ["satsrover-claim"],
+          "#v": ["2"],
+          since: claimsSinceCreatedAt,
+        },
       ]),
     );
   });
@@ -831,6 +1553,49 @@ function connect(url: string) {
         const event = envelope.event;
         const kindLabel = getEventKindLabel(event);
         const versionLabel = getEventVersionLabel(event);
+        if (event?.kind === CLAIMS_KIND) {
+          claimsSeenTotal.labels(CLAIMS_LANE).inc();
+          const nowSec = Math.floor(nowMs / 1000);
+          const claimsValidation = validateClaimsEventStrict(event, nowSec);
+          if (!claimsValidation.ok) {
+            claimsRejectedTotal
+              .labels(CLAIMS_LANE, claimsValidation.reason)
+              .inc();
+            log("warn", "claims_event_rejected", {
+              relay: url,
+              eventId: claimsValidation.eventId || "unknown",
+              reason: claimsValidation.reason,
+            });
+            return;
+          }
+          const claimsUpsertResult = await reduceClaimEvent(pool, {
+            pubkey: claimsValidation.pubkey,
+            d: claimsValidation.d,
+            placeId: claimsValidation.placeId,
+            role: claimsValidation.role,
+            createdAt: claimsValidation.createdAt,
+            eventId: claimsValidation.eventId,
+            content: claimsValidation.content,
+          });
+          claimsUpsertTotal.labels(CLAIMS_LANE, claimsUpsertResult).inc();
+          if (claimsUpsertResult !== "ignored") {
+            await upsertWatermarkMonotonic(
+              pool,
+              CLAIMS_WATERMARK_KEY,
+              claimsValidation.createdAt,
+            );
+            const previousClaimsWatermark = cachedClaimsWatermarkSec;
+            cachedClaimsWatermarkSec = Math.max(
+              cachedClaimsWatermarkSec,
+              claimsValidation.createdAt,
+            );
+            watermarkValue.labels(CLAIMS_LANE).set(cachedClaimsWatermarkSec);
+            if (cachedClaimsWatermarkSec > previousClaimsWatermark) {
+              watermarkUpdatesTotal.labels(CLAIMS_LANE).inc();
+            }
+          }
+          return;
+        }
         eventsReceivedTotal
           .labels(url, kindLabel, versionLabel)
           .inc();
@@ -1012,20 +1777,77 @@ function connect(url: string) {
         }
         sigverifyPassed += 1;
 
+        if (kindLabel === String(SIGNALS_KIND) && versionLabel === "2") {
+          signalsV2SeenTotal.labels(SIGNALS_LANE).inc();
+          const parsedV2 = parseSignalsV2EventStrict(event, nowSec);
+          if (!parsedV2.ok) {
+            signalsV2RejectedTotal
+              .labels(SIGNALS_LANE, parsedV2.reason)
+              .inc();
+            log("warn", "signals_v2_rejected", {
+              relay: url,
+              eventId: parsedV2.eventId || prefilter.eventId || "unknown",
+              reason: parsedV2.reason,
+            });
+            return;
+          }
+
+          expensivePathInvoked += 1;
+          recordAccepted(url, nowMs);
+          eventsAcceptedTotal.labels(kindLabel, versionLabel).inc();
+          const reduceResult = await reduceSignalsV2Event(pool, url, parsedV2);
+          signalsV2UpsertTotal.labels(SIGNALS_LANE, reduceResult).inc();
+          if (reduceResult !== "ignored") {
+            await upsertWatermarkMonotonic(
+              pool,
+              SIGNALS_WATERMARK_KEY,
+              parsedV2.createdAt,
+            );
+            const previousWatermark = cachedSignalsWatermarkSec;
+            cachedSignalsWatermarkSec = Math.max(
+              cachedSignalsWatermarkSec,
+              parsedV2.createdAt,
+            );
+            watermarkValue.labels(SIGNALS_LANE).set(cachedSignalsWatermarkSec);
+            if (cachedSignalsWatermarkSec > previousWatermark) {
+              watermarkUpdatesTotal.labels(SIGNALS_LANE).inc();
+            }
+            log("info", "signals_v2_state_upsert", {
+              relay: url,
+              placeId: parsedV2.placeId,
+              status: parsedV2.status,
+              result: reduceResult,
+            });
+          }
+          return;
+        }
+
+        if (kindLabel === "30331" && versionLabel === "2") {
+          v2SeenTotal.labels(SIGNALS_LANE).inc();
+          const softV2 = validateSignalsV2Soft(event);
+          for (const reason of softV2.reasons) {
+            v2SoftInvalidTotal.labels(SIGNALS_LANE, reason).inc();
+          }
+          for (const tag of softV2.unknownTags) {
+            v2SoftUnknownTagTotal.labels(SIGNALS_LANE, tag).inc();
+          }
+          if (softV2.firstReason) {
+            log("warn", "v2_soft_validation_failed", {
+              relay: url,
+              url,
+              eventId: prefilter.eventId,
+              reason: softV2.firstReason,
+            });
+          }
+        }
+
         expensivePathInvoked += 1;
         recordAccepted(url, nowMs);
         eventsAcceptedTotal.labels(kindLabel, versionLabel).inc();
         const result = await processSatsRoverEvent(pool, event);
-        await upsertWatermarkMonotonic(
-          pool,
-          SIGNALS_WATERMARK_KEY,
-          event.created_at,
-        );
+        await upsertWatermarkMonotonic(pool, SIGNALS_WATERMARK_KEY, event.created_at);
         const previousWatermark = cachedSignalsWatermarkSec;
-        cachedSignalsWatermarkSec = Math.max(
-          cachedSignalsWatermarkSec,
-          event.created_at,
-        );
+        cachedSignalsWatermarkSec = Math.max(cachedSignalsWatermarkSec, event.created_at);
         watermarkValue.labels(SIGNALS_LANE).set(cachedSignalsWatermarkSec);
         if (cachedSignalsWatermarkSec > previousWatermark) {
           watermarkUpdatesTotal.labels(SIGNALS_LANE).inc();
@@ -1085,11 +1907,34 @@ startStatsTimerIfNeeded();
 // Delay relay connects until ingestion_state init attempt finishes to avoid
 // early watermark SELECT failures during startup.
 ensureIngestionStateTable(pool)
-  .then(() => getWatermark(pool, SIGNALS_WATERMARK_KEY))
-  .then((watermarkSec) => {
-    cachedSignalsWatermarkSec = watermarkSec;
+  .then(() =>
+    ensureClaimsTable(pool).catch((err: any) => {
+      log("error", "claims_table_init_failed", {
+        error: err?.message || String(err),
+      });
+      throw err;
+    }),
+  )
+  .then(() =>
+    ensureSignalsV2Tables(pool).catch((err: any) => {
+      log("error", "signals_v2_table_init_failed", {
+        error: err?.message || String(err),
+      });
+      throw err;
+    }),
+  )
+  .then(() =>
+    Promise.all([
+      getWatermark(pool, SIGNALS_WATERMARK_KEY),
+      getWatermark(pool, CLAIMS_WATERMARK_KEY),
+    ]),
+  )
+  .then(([signalsWatermarkSec, claimsWatermarkSec]) => {
+    cachedSignalsWatermarkSec = signalsWatermarkSec;
+    cachedClaimsWatermarkSec = claimsWatermarkSec;
     watermarkValue.labels(SIGNALS_LANE).set(cachedSignalsWatermarkSec);
-    if (watermarkSec === 0) {
+    watermarkValue.labels(CLAIMS_LANE).set(cachedClaimsWatermarkSec);
+    if (signalsWatermarkSec === 0) {
       log("warn", "watermark_zero_after_init", {
         key: SIGNALS_WATERMARK_KEY,
       });
@@ -1100,7 +1945,9 @@ ensureIngestionStateTable(pool)
       error: err?.message || String(err),
     });
     cachedSignalsWatermarkSec = 0;
+    cachedClaimsWatermarkSec = 0;
     watermarkValue.labels(SIGNALS_LANE).set(cachedSignalsWatermarkSec);
+    watermarkValue.labels(CLAIMS_LANE).set(cachedClaimsWatermarkSec);
   })
   .finally(() => {
     RELAYS.forEach(connect);
