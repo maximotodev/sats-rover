@@ -7,8 +7,10 @@ import logging
 import secrets
 import time
 import uuid
+from typing import Any, Callable, Mapping
 
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.schemas.signal import (
@@ -25,61 +27,169 @@ logger = logging.getLogger(__name__)
 CHECKIN_INTENT_TTL_SECONDS = 120
 CHECKIN_PENDING_TTL_SECONDS = 900  # 15 minutes
 CHECKIN_STATUS_PENDING_WINDOW_SECONDS = 20
+_v2_fallback_warned = False
+
+
+def _is_undefined_table_error(exc: Exception) -> bool:
+    if not isinstance(exc, DBAPIError):
+        return False
+    orig = getattr(exc, "orig", None)
+    sqlstate = getattr(orig, "sqlstate", None) or getattr(orig, "pgcode", None)
+    if sqlstate == "42P01":
+        return True
+    message = str(orig or exc).lower()
+    return "relation" in message and "does not exist" in message
+
+
+def _warn_v2_fallback_once() -> None:
+    global _v2_fallback_warned
+    if _v2_fallback_warned:
+        return
+    _v2_fallback_warned = True
+    logger.warning("signals_v2_state_missing_falling_back_to_v1")
+
+
+def _build_content_preview(raw_content: object) -> str:
+    if not isinstance(raw_content, str) or not raw_content:
+        return ""
+    try:
+        parsed = json.loads(raw_content)
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, dict) and isinstance(parsed.get("note"), str):
+        preview = parsed.get("note")
+    else:
+        preview = raw_content
+    preview = " ".join(preview.split())
+    return preview[:140]
 
 
 async def get_place_feed(db: AsyncSession, place_id: str, limit: int = 50) -> PlaceFeedOut:
-    rows = (
-        await db.execute(
-            text(
-                """
-                SELECT event_id, pubkey, status, created_at
-                FROM signals
-                WHERE place_id = :place_id
-                ORDER BY created_at DESC
-                LIMIT :limit
-                """
-            ),
-            {"place_id": place_id, "limit": limit},
-        )
-    ).mappings().all()
+    using_v2 = True
+    try:
+        rows = (
+            await db.execute(
+                text(
+                    """
+                    SELECT event_id, pubkey, status, created_at, content
+                    FROM signals_v2_state
+                    WHERE place_id = :place_id
+                    ORDER BY created_at DESC, event_id DESC
+                    LIMIT :limit
+                    """
+                ),
+                {"place_id": place_id, "limit": limit},
+            )
+        ).mappings().all()
 
-    summary = (
-        await db.execute(
-            text(
-                """
-                SELECT
-                  COUNT(*)::int AS total_signals,
-                  COUNT(*) FILTER (WHERE status = 'success')::int AS recent_successes,
-                  MAX(created_at) FILTER (WHERE status = 'success') AS last_confirmed_at
-                FROM signals
-                WHERE place_id = :place_id
-                """
-            ),
-            {"place_id": place_id},
-        )
-    ).mappings().first()
+        summary = (
+            await db.execute(
+                text(
+                    """
+                    SELECT
+                      COUNT(*)::int AS total_signals,
+                      COUNT(*) FILTER (WHERE status = 'success')::int AS recent_successes,
+                      MAX(created_at) FILTER (WHERE status = 'success') AS last_confirmed_at
+                    FROM signals_v2_state
+                    WHERE place_id = :place_id
+                    """
+                ),
+                {"place_id": place_id},
+            )
+        ).mappings().first()
+    except DBAPIError as exc:
+        if not _is_undefined_table_error(exc):
+            raise
+        _warn_v2_fallback_once()
+        using_v2 = False
+        rows = (
+            await db.execute(
+                text(
+                    """
+                    SELECT event_id, pubkey, status, created_at
+                    FROM signals
+                    WHERE place_id = :place_id
+                    ORDER BY created_at DESC
+                    LIMIT :limit
+                    """
+                ),
+                {"place_id": place_id, "limit": limit},
+            )
+        ).mappings().all()
+
+        summary = (
+            await db.execute(
+                text(
+                    """
+                    SELECT
+                      COUNT(*)::int AS total_signals,
+                      COUNT(*) FILTER (WHERE status = 'success')::int AS recent_successes,
+                      MAX(created_at) FILTER (WHERE status = 'success') AS last_confirmed_at
+                    FROM signals
+                    WHERE place_id = :place_id
+                    """
+                ),
+                {"place_id": place_id},
+            )
+        ).mappings().first()
 
     total = int(summary["total_signals"] or 0) if summary else 0
     successes = int(summary["recent_successes"] or 0) if summary else 0
     confidence = 0.0 if total == 0 else round((successes / total) * 100, 2)
 
-    items = [
-        SignalFeedItem(
-            event_id=r["event_id"],
-            pubkey=r["pubkey"],
-            status=r["status"],
-            created_at=r["created_at"],
-            content="",
+    if using_v2:
+        def _to_created_at_v2(r: Mapping[str, Any]) -> datetime:
+            return datetime.fromtimestamp(int(r["created_at"]), tz=timezone.utc)
+
+        def _to_raw_content_v2(r: Mapping[str, Any]) -> str:
+            return r.get("content") or ""
+
+        def _to_preview_v2(raw: str) -> str:
+            return _build_content_preview(raw)
+
+        to_created_at: Callable[[Mapping[str, Any]], datetime] = _to_created_at_v2
+        to_raw_content: Callable[[Mapping[str, Any]], str] = _to_raw_content_v2
+        to_preview: Callable[[str], str] = _to_preview_v2
+    else:
+        def _to_created_at_v1(r: Mapping[str, Any]) -> datetime:
+            return r["created_at"]
+
+        def _to_raw_content_v1(r: Mapping[str, Any]) -> str:
+            return ""
+
+        def _to_preview_v1(raw: str) -> str:
+            return ""
+
+        to_created_at: Callable[[Mapping[str, Any]], datetime] = _to_created_at_v1
+        to_raw_content: Callable[[Mapping[str, Any]], str] = _to_raw_content_v1
+        to_preview: Callable[[str], str] = _to_preview_v1
+
+    items: list[SignalFeedItem] = []
+    for r in rows:
+        raw_content = to_raw_content(r)
+        items.append(
+            SignalFeedItem(
+                event_id=r["event_id"],
+                pubkey=r["pubkey"],
+                status=r["status"],
+                created_at=to_created_at(r),
+                content=raw_content,
+                content_preview=to_preview(raw_content),
+            )
         )
-        for r in rows
-    ]
+
+    last_confirmed_at = summary["last_confirmed_at"] if summary else None
+    if using_v2 and last_confirmed_at is not None:
+        last_confirmed_at = datetime.fromtimestamp(
+            int(last_confirmed_at), tz=timezone.utc
+        )
 
     return PlaceFeedOut(
         place_id=place_id,
         confidence_score=confidence,
         total_signals=total,
         recent_successes=successes,
-        last_confirmed_at=summary["last_confirmed_at"] if summary else None,
+        last_confirmed_at=last_confirmed_at,
         items=items,
     )
 
@@ -112,22 +222,44 @@ async def _find_same_day_signal_event_id(
     pubkey: str,
     place_id: str,
 ) -> str | None:
-    row = (
-        await db.execute(
-            text(
-                """
-                SELECT event_id
-                FROM signals
-                WHERE pubkey = :pubkey
-                  AND place_id = :place_id
-                  AND signal_date = CURRENT_DATE
-                ORDER BY created_at DESC
-                LIMIT 1
-                """
-            ),
-            {"pubkey": pubkey, "place_id": place_id},
-        )
-    ).mappings().first()
+    day_utc = int(datetime.now(timezone.utc).timestamp()) // 86400
+    try:
+        row = (
+            await db.execute(
+                text(
+                    """
+                    SELECT event_id
+                    FROM signals_v2_state
+                    WHERE pubkey = :pubkey
+                      AND place_id = :place_id
+                      AND day_utc = :day_utc
+                    ORDER BY created_at DESC, event_id DESC
+                    LIMIT 1
+                    """
+                ),
+                {"pubkey": pubkey, "place_id": place_id, "day_utc": day_utc},
+            )
+        ).mappings().first()
+    except DBAPIError as exc:
+        if not _is_undefined_table_error(exc):
+            raise
+        _warn_v2_fallback_once()
+        row = (
+            await db.execute(
+                text(
+                    """
+                    SELECT event_id
+                    FROM signals
+                    WHERE pubkey = :pubkey
+                      AND place_id = :place_id
+                      AND signal_date = CURRENT_DATE
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """
+                ),
+                {"pubkey": pubkey, "place_id": place_id},
+            )
+        ).mappings().first()
     if not row:
         return None
     event_id = row.get("event_id")
