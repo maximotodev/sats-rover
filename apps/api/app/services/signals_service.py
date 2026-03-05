@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import logging
+import re
 import secrets
 import time
 import uuid
@@ -27,26 +28,102 @@ logger = logging.getLogger(__name__)
 CHECKIN_INTENT_TTL_SECONDS = 120
 CHECKIN_PENDING_TTL_SECONDS = 900  # 15 minutes
 CHECKIN_STATUS_PENDING_WINDOW_SECONDS = 20
-_v2_fallback_warned = False
+_ALLOWED_V2_MISSING_RELATIONS = {"signals_v2_state", "signals_v2_events"}
+_SIGNAL_CONTENT_MAX_LEN = 4096
 
 
-def _is_undefined_table_error(exc: Exception) -> bool:
+def _extract_missing_relation_name(exc: Exception) -> str | None:
     if not isinstance(exc, DBAPIError):
-        return False
+        return None
     orig = getattr(exc, "orig", None)
     sqlstate = getattr(orig, "sqlstate", None) or getattr(orig, "pgcode", None)
-    if sqlstate == "42P01":
-        return True
-    message = str(orig or exc).lower()
-    return "relation" in message and "does not exist" in message
+    if sqlstate != "42P01":
+        return None
+    message = str(orig or exc)[:4096]
+    match = re.search(
+        r'relation\s+"([^"]+)"\s+does not exist',
+        message,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    relation = match.group(1).strip()
+    if not relation:
+        return None
+    return relation.split(".")[-1]
 
 
-def _warn_v2_fallback_once() -> None:
-    global _v2_fallback_warned
-    if _v2_fallback_warned:
-        return
-    _v2_fallback_warned = True
-    logger.warning("signals_v2_state_missing_falling_back_to_v1")
+def _should_fallback_to_v1(
+    exc: Exception,
+    allowed_relations: set[str],
+) -> tuple[bool, str | None]:
+    missing_relation = _extract_missing_relation_name(exc)
+    if missing_relation is None:
+        return False, None
+    return missing_relation in allowed_relations, missing_relation
+
+
+async def _execute_v2_or_v1(
+    *,
+    db: AsyncSession,
+    query_name: str,
+    v2_sql: str,
+    v2_params: dict[str, Any],
+    v1_sql: str,
+    v1_params: dict[str, Any],
+    log_context: dict[str, Any],
+    fetch: str,
+) -> tuple[bool, Any]:
+    def _extract(result: Any) -> Any:
+        mappings = result.mappings()
+        if fetch == "all":
+            return mappings.all()
+        return mappings.first()
+
+    try:
+        result = await db.execute(text(v2_sql), v2_params)
+        return True, _extract(result)
+    except DBAPIError as exc:
+        should_fallback, missing_relation = _should_fallback_to_v1(
+            exc,
+            _ALLOWED_V2_MISSING_RELATIONS,
+        )
+        if not should_fallback:
+            raise
+        logger.warning(
+            "signals_v2_fallback_to_v1",
+            extra={
+                "query_name": query_name,
+                "missing_relation": missing_relation,
+                **log_context,
+            },
+        )
+        result = await db.execute(text(v1_sql), v1_params)
+        return False, _extract(result)
+
+
+async def _is_event_ingested(*, db: AsyncSession, event_id: str) -> bool:
+    _, row = await _execute_v2_or_v1(
+        db=db,
+        query_name="event_ingested_probe",
+        v2_sql="""
+                    SELECT 1 AS one
+                    FROM signals_v2_events
+                    WHERE event_id = :event_id
+                    LIMIT 1
+                    """,
+        v2_params={"event_id": event_id},
+        v1_sql="""
+                    SELECT 1 AS one
+                    FROM signals
+                    WHERE event_id = :event_id
+                    LIMIT 1
+                    """,
+        v1_params={"event_id": event_id},
+        log_context={"event_id": event_id},
+        fetch="first",
+    )
+    return row is not None
 
 
 def _build_content_preview(raw_content: object) -> str:
@@ -64,85 +141,89 @@ def _build_content_preview(raw_content: object) -> str:
     return preview[:140]
 
 
+def _normalize_signal_content(raw: object, *, max_len: int) -> str:
+    if not isinstance(raw, str):
+        return ""
+    return raw[:max_len]
+
+
+def _utc_day_int(dt: datetime) -> int:
+    return int(dt.astimezone(timezone.utc).timestamp()) // 86400
+
+
 async def get_place_feed(db: AsyncSession, place_id: str, limit: int = 50) -> PlaceFeedOut:
-    using_v2 = True
-    try:
-        rows = (
-            await db.execute(
-                text(
-                    """
+    using_v2_rows, rows = await _execute_v2_or_v1(
+        db=db,
+        query_name="place_feed_rows",
+        v2_sql="""
                     SELECT event_id, pubkey, status, created_at, content
                     FROM signals_v2_state
                     WHERE place_id = :place_id
                     ORDER BY created_at DESC, event_id DESC
                     LIMIT :limit
-                    """
-                ),
-                {"place_id": place_id, "limit": limit},
-            )
-        ).mappings().all()
+                    """,
+        v2_params={"place_id": place_id, "limit": limit},
+        v1_sql="""
+                    SELECT event_id, pubkey, status, created_at
+                    FROM signals
+                    WHERE place_id = :place_id
+                    ORDER BY created_at DESC
+                    LIMIT :limit
+                    """,
+        v1_params={"place_id": place_id, "limit": limit},
+        log_context={"place_id": place_id},
+        fetch="all",
+    )
 
-        summary = (
-            await db.execute(
-                text(
-                    """
+    using_v2_summary, summary = await _execute_v2_or_v1(
+        db=db,
+        query_name="place_feed_summary",
+        v2_sql="""
                     SELECT
                       COUNT(*)::int AS total_signals,
                       COUNT(*) FILTER (WHERE status = 'success')::int AS recent_successes,
                       MAX(created_at) FILTER (WHERE status = 'success') AS last_confirmed_at
                     FROM signals_v2_state
                     WHERE place_id = :place_id
-                    """
-                ),
-                {"place_id": place_id},
-            )
-        ).mappings().first()
-    except DBAPIError as exc:
-        if not _is_undefined_table_error(exc):
-            raise
-        _warn_v2_fallback_once()
-        using_v2 = False
-        rows = (
-            await db.execute(
-                text(
-                    """
-                    SELECT event_id, pubkey, status, created_at
-                    FROM signals
-                    WHERE place_id = :place_id
-                    ORDER BY created_at DESC
-                    LIMIT :limit
-                    """
-                ),
-                {"place_id": place_id, "limit": limit},
-            )
-        ).mappings().all()
-
-        summary = (
-            await db.execute(
-                text(
-                    """
+                    """,
+        v2_params={"place_id": place_id},
+        v1_sql="""
                     SELECT
                       COUNT(*)::int AS total_signals,
                       COUNT(*) FILTER (WHERE status = 'success')::int AS recent_successes,
                       MAX(created_at) FILTER (WHERE status = 'success') AS last_confirmed_at
                     FROM signals
                     WHERE place_id = :place_id
-                    """
-                ),
-                {"place_id": place_id},
-            )
-        ).mappings().first()
+                    """,
+        v1_params={"place_id": place_id},
+        log_context={"place_id": place_id},
+        fetch="first",
+    )
+
+    use_v2_mode = using_v2_rows and using_v2_summary
+    if using_v2_rows != using_v2_summary:
+        logger.warning(
+            "signals_v2_mixed_mode_falling_back_to_v1",
+            extra={
+                "place_id": place_id,
+                "using_v2_rows": using_v2_rows,
+                "using_v2_summary": using_v2_summary,
+            },
+        )
 
     total = int(summary["total_signals"] or 0) if summary else 0
     successes = int(summary["recent_successes"] or 0) if summary else 0
     confidence = 0.0 if total == 0 else round((successes / total) * 100, 2)
 
-    if using_v2:
+    if use_v2_mode:
         def _to_created_at_v2(r: Mapping[str, Any]) -> datetime:
             return datetime.fromtimestamp(int(r["created_at"]), tz=timezone.utc)
 
         def _to_raw_content_v2(r: Mapping[str, Any]) -> str:
-            return r.get("content") or ""
+            return _normalize_signal_content(
+                r.get("content"),
+                max_len=_SIGNAL_CONTENT_MAX_LEN,
+            )
 
         def _to_preview_v2(raw: str) -> str:
             return _build_content_preview(raw)
@@ -179,7 +260,7 @@ async def get_place_feed(db: AsyncSession, place_id: str, limit: int = 50) -> Pl
         )
 
     last_confirmed_at = summary["last_confirmed_at"] if summary else None
-    if using_v2 and last_confirmed_at is not None:
+    if use_v2_mode and last_confirmed_at is not None:
         last_confirmed_at = datetime.fromtimestamp(
             int(last_confirmed_at), tz=timezone.utc
         )
@@ -222,32 +303,21 @@ async def _find_same_day_signal_event_id(
     pubkey: str,
     place_id: str,
 ) -> str | None:
-    day_utc = int(datetime.now(timezone.utc).timestamp()) // 86400
-    try:
-        row = (
-            await db.execute(
-                text(
-                    """
+    day_utc = _utc_day_int(datetime.now(timezone.utc))
+    _, row = await _execute_v2_or_v1(
+        db=db,
+        query_name="same_day_duplicate_lookup",
+        v2_sql="""
                     SELECT event_id
-                    FROM signals_v2_state
+                    FROM signals_v2_events
                     WHERE pubkey = :pubkey
                       AND place_id = :place_id
                       AND day_utc = :day_utc
                     ORDER BY created_at DESC, event_id DESC
                     LIMIT 1
-                    """
-                ),
-                {"pubkey": pubkey, "place_id": place_id, "day_utc": day_utc},
-            )
-        ).mappings().first()
-    except DBAPIError as exc:
-        if not _is_undefined_table_error(exc):
-            raise
-        _warn_v2_fallback_once()
-        row = (
-            await db.execute(
-                text(
-                    """
+                    """,
+        v2_params={"pubkey": pubkey, "place_id": place_id, "day_utc": day_utc},
+        v1_sql="""
                     SELECT event_id
                     FROM signals
                     WHERE pubkey = :pubkey
@@ -255,11 +325,11 @@ async def _find_same_day_signal_event_id(
                       AND signal_date = CURRENT_DATE
                     ORDER BY created_at DESC
                     LIMIT 1
-                    """
-                ),
-                {"pubkey": pubkey, "place_id": place_id},
-            )
-        ).mappings().first()
+                    """,
+        v1_params={"pubkey": pubkey, "place_id": place_id},
+        log_context={"place_id": place_id, "pubkey": pubkey},
+        fetch="first",
+    )
     if not row:
         return None
     event_id = row.get("event_id")
@@ -375,13 +445,7 @@ async def confirm_checkin(
         },
     )
 
-    ingested_row = (
-        await db.execute(
-            text("SELECT event_id FROM signals WHERE event_id = :event_id LIMIT 1"),
-            {"event_id": payload.event_id},
-        )
-    ).mappings().first()
-    if ingested_row and isinstance(ingested_row.get("event_id"), str):
+    if await _is_event_ingested(db=db, event_id=payload.event_id):
         await db.execute(
             text(
                 """
@@ -398,7 +462,7 @@ async def confirm_checkin(
         return CheckinConfirmOut(
             status="ok",
             reason_code="confirmed",
-            event_id=ingested_row["event_id"],
+            event_id=payload.event_id,
         )
 
     pending_key = f"checkin:pending:{payload.event_id}"
@@ -496,14 +560,8 @@ async def get_checkin_status(
                 event_id=event_id if isinstance(event_id, str) else None,
             )
 
-    event_row = (
-        await db.execute(
-            text("SELECT event_id FROM signals WHERE event_id = :event_id LIMIT 1"),
-            {"event_id": checkin_id},
-        )
-    ).mappings().first()
-    if event_row and isinstance(event_row.get("event_id"), str):
-        return CheckinStatusOut(status="ok", reason_code="confirmed", event_id=event_row["event_id"])
+    if await _is_event_ingested(db=db, event_id=checkin_id):
+        return CheckinStatusOut(status="ok", reason_code="confirmed", event_id=checkin_id)
 
     derived_pubkey = pubkey
     derived_place_id = place_id

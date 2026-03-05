@@ -176,11 +176,11 @@ class CheckinsIdempotencyTests(unittest.IsolatedAsyncioTestCase):
             sql = str(stmt)
             if "FROM signals" in sql and "pubkey =" in sql:
                 return _MappingsResult(None)
+            if "FROM signals_v2_events" in sql and "WHERE event_id" in sql:
+                return _MappingsResult({"one": 1})
             if "INSERT INTO checkin_submissions" in sql:
                 calls["inserted"] = True
                 return _MappingsResult(None)
-            if "SELECT event_id FROM signals WHERE event_id = :event_id" in sql:
-                return _MappingsResult({"event_id": payload.event_id})
             if "UPDATE checkin_submissions" in sql:
                 calls["updated"] = True
                 self.assertEqual(params.get("event_id"), payload.event_id)
