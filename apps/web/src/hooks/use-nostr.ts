@@ -7,7 +7,7 @@ import NDK, {
   NDKUserProfile,
 } from "@nostr-dev-kit/ndk";
 import { nip19, generateSecretKey } from "nostr-tools";
-import { getNDK } from "@/lib/ndk"; // ✅ Singleton Import
+import { getNDK } from "@/lib/ndk";
 import { storeNsec, loadNsec, clearNsec } from "@/lib/storage";
 import { hydrateUserProfile } from "@/lib/session-hydration";
 
@@ -42,7 +42,9 @@ export function useNostr() {
 
   const buildSessionFromUser = useCallback(
     async (type: SessionType, user: NDKUser): Promise<NostrSession> => {
-      const profile = (await hydrateUserProfile(user)) as NDKUserProfile | undefined;
+      const profile = (await hydrateUserProfile(user)) as
+        | NDKUserProfile
+        | undefined;
       return { type, pubkey: user.pubkey, user, profile };
     },
     [],
@@ -124,7 +126,12 @@ export function useNostr() {
   }, [ndk]);
 
   useEffect(() => {
-    if (session.type === "anon" || !session.pubkey || !session.user || session.profile) {
+    if (
+      session.type === "anon" ||
+      !session.pubkey ||
+      !session.user ||
+      session.profile
+    ) {
       return;
     }
     if (profileHydrationAttempted.current.has(session.pubkey)) {
@@ -138,7 +145,8 @@ export function useNostr() {
       .then((profile) => {
         if (cancelled || !profile) return;
         setSession((prev) => {
-          if (prev.pubkey !== currentPubkey || prev.type === "anon") return prev;
+          if (prev.pubkey !== currentPubkey || prev.type === "anon")
+            return prev;
           return { ...prev, profile, user: prev.user };
         });
       })
@@ -185,7 +193,6 @@ export function useNostr() {
     },
     [ndk, session],
   );
-
 
   const updateProfile = useCallback(
     async (name: string, about: string, picture: string) => {

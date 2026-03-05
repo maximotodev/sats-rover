@@ -37,7 +37,7 @@ except ImportError:  # pragma: no cover
 
 try:
     from app.services.checkins_service import (
-        confirm_checkin,
+        confirm_checkin as _confirm_checkin,
         create_checkin_intent,
         get_checkin_status,
     )
@@ -56,13 +56,23 @@ except ImportError:  # pragma: no cover
     ) -> Any:
         return await _create_checkin_intent(place_id=place_id, requester_id=requester_ip)
 
+else:
     async def confirm_checkin(
         *,
         db: AsyncSession,
-        checkin_id: str | None,
+        intent_token: str | None,
         payload: CheckinConfirmIn,
     ) -> Any:
-        return await _confirm_checkin(payload=payload, intent_token=checkin_id)
+        return await _confirm_checkin(db=db, intent_token=intent_token, payload=payload)
+
+if "confirm_checkin" not in globals():
+    async def confirm_checkin(
+        *,
+        db: AsyncSession,
+        intent_token: str | None,
+        payload: CheckinConfirmIn,
+    ) -> Any:
+        return await _confirm_checkin(db=db, payload=payload, intent_token=intent_token)
 
     async def get_checkin_status(*, db: AsyncSession, checkin_id: str) -> CheckinStatusOut:
         raw = await redis_client.get(f"checkin:pending:{checkin_id}")
@@ -302,7 +312,7 @@ async def checkin_intent(
 async def checkin_confirm(
     request: Request,
     payload: CheckinConfirmIn,
-    x_checkin_id: str | None = Header(default=None, alias="X-Checkin-Id"),
+    x_checkin_id: str | None = Header(default=None, alias="X-Checkin-Intent"),
     db: AsyncSession = Depends(get_db),
 ):
     raw_body = await request.body()
@@ -311,7 +321,7 @@ async def checkin_confirm(
         target_pubkey=payload.pubkey,
         raw_body=raw_body,
     )
-    return await confirm_checkin(db=db, checkin_id=x_checkin_id, payload=payload)
+    return await confirm_checkin(db=db, intent_token=x_checkin_id, payload=payload)
 
 
 @router.get("/checkins/status", response_model=CheckinStatusOut)

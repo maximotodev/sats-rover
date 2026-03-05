@@ -1,3 +1,4 @@
+# apps/api/app/schemas/signal.py
 from __future__ import annotations
 
 from datetime import datetime
@@ -12,6 +13,7 @@ class SignalFeedItem(BaseModel):
     pubkey: str = Field(pattern=HEX64)
     status: str
     content: str = ""
+    content_preview: str = ""
     created_at: datetime
 
 

@@ -1,3 +1,4 @@
+// apps/web/src/app/api/places/[placeId]/feed/route.ts
 import { NextResponse } from "next/server";
 
 const ENGINE_URL = process.env.ROVER_ENGINE_URL || "http://localhost:8000";
@@ -28,9 +29,6 @@ export async function GET(
     return NextResponse.json({ data }, { status: 200 });
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : "Feed unavailable";
-    return NextResponse.json(
-      { error: message },
-      { status: 200 },
-    );
+    return NextResponse.json({ error: message }, { status: 200 });
   }
 }

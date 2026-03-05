@@ -1,0 +1,439 @@
+{
+  "protocol": {
+    "name": "SatsRover",
+    "version": "2",
+    "goals": [
+      "Nostr-native: use standard event semantics, simple REQ filters, minimal bespoke rules",
+      "Bitcoin-native: support Lightning/Zaps without forcing hot-path invoice parsing",
+      "Scalable for relays/indexers: bounded validation, low-cardinality tags, predictable reducer rules",
+      "Explicit semantics: immutable history vs replaceable state",
+      "Abuse-resistant: strict shape, bounded tags, bounded CPU"
+    ],
+    "compatibility": {
+      "nostr_core": ["NIP-01"],
+      "application_state": ["NIP-78 (kind 30078)"],
+      "optional_bitcoin_integrations": ["NIP-57 (Zaps)", "NIP-47 (NWC)"],
+      "optional_geo": ["NIP-52 (tag g geohash)"]
+    }
+  },
+  "namespaces": {
+    "hashtags": {
+      "root": "satsrover",
+      "claim": "satsrover-claim",
+      "profile": "satsrover-profile"
+    },
+    "tags": {
+      "protocol_version_tag": "v",
+      "place_tag": "place",
+      "status_tag": "status",
+      "geohash_tag": "g",
+      "client_tag": "client",
+      "identifier_tag": "d"
+    }
+  },
+  "event_model": {
+    "lanes": [
+      {
+        "lane": "history",
+        "description": "Append-only facts (time series). Stored immutably; used for feeds, rollups, analytics, abuse detection.",
+        "kinds": [30331]
+      },
+      {
+        "lane": "state",
+        "description": "Replaceable application state (latest wins). Used for ownership claims and optional profile overrides.",
+        "kinds": [30078]
+      }
+    ],
+    "kinds": {
+      "30331": {
+        "name": "signal",
+        "semantic_type": "history",
+        "replaceable": false,
+        "description": "A user check-in / signal about a merchant/place (attempted payment status + optional comment).",
+        "required_tags": [
+          ["t", "satsrover"],
+          ["v", "2"],
+          ["place", "<place_id>"],
+          ["status", "success|failed|did_not_try"]
+        ],
+        "recommended_tags": [
+          ["client", "<client_id>"]
+        ],
+        "optional_tags": [
+          ["g", "<geohash_5_to_7>"],
+          ["amount_msat", "<stringified_integer_msat>"],
+          ["zap", "<zap_event_id_hex64>"],
+          ["bolt11", "<bolt11_invoice_string>"]
+        ],
+        "content": {
+          "type": "string",
+          "meaning": "Human comment only. Machine data MUST be in tags.",
+          "recommended_max_chars": 280,
+          "may_be_empty": true
+        }
+      },
+      "30078": {
+        "name": "app_state",
+        "semantic_type": "state",
+        "replaceable": "parameterized_replaceable",
+        "description": "Application-specific replaceable state. SatsRover uses it for claims and optional place profiles.",
+        "required_tags": [
+          ["v", "2"],
+          ["d", "<stable_identifier>"]
+        ],
+        "subtypes": {
+          "claim": {
+            "name": "merchant_claim",
+            "replaceable_key": "(pubkey, d)",
+            "d_format": "claim:<place_id>",
+            "required_tags": [
+              ["t", "satsrover-claim"],
+              ["t", "satsrover"],
+              ["v", "2"],
+              ["d", "claim:<place_id>"],
+              ["place", "<place_id>"],
+              ["role", "owner"]
+            ],
+            "optional_tags": [
+              ["method", "dns|invoice|signed_statement|other"],
+              ["expires", "<unix_seconds_integer_as_string>"],
+              ["client", "<client_id>"]
+            ],
+            "content": {
+              "type": "json_string",
+              "meaning": "Structured proofs/evidence references. Keep small; store references not blobs.",
+              "schema_hint": {
+                "proofs": [
+                  {
+                    "type": "dns|lnurlp|bolt11|zap|other",
+                    "value": "string",
+                    "ref": "optional string reference"
+                  }
+                ],
+                "note": "optional short string"
+              },
+              "recommended_max_bytes": 4096
+            }
+          },
+          "profile": {
+            "name": "place_profile_override",
+            "replaceable_key": "(pubkey, d)",
+            "d_format": "profile:<place_id>",
+            "required_tags": [
+              ["t", "satsrover-profile"],
+              ["t", "satsrover"],
+              ["v", "2"],
+              ["d", "profile:<place_id>"],
+              ["place", "<place_id>"]
+            ],
+            "optional_tags": [
+              ["g", "<geohash_5_to_7>"],
+              ["client", "<client_id>"]
+            ],
+            "content": {
+              "type": "json_string",
+              "meaning": "Optional merchant-supplied display metadata. Clients MUST treat as untrusted unless verified by policy.",
+              "schema_hint": {
+                "name": "optional string",
+                "website": "optional string",
+                "lnurl": "optional string",
+                "hours": "optional object",
+                "note": "optional string"
+              },
+              "recommended_max_bytes": 4096
+            }
+          }
+        }
+      }
+    }
+  },
+  "req_filters": {
+    "indexer": {
+      "purpose": "Subscribe to the minimal streams needed for ingestion and state reduction.",
+      "subscriptions": [
+        {
+          "sub_id": "sr_live",
+          "filter": {
+            "kinds": [30331],
+            "#t": ["satsrover"],
+            "#v": ["2"]
+          },
+          "notes": [
+            "Add `since` on reconnect if you want a short replay window.",
+            "Avoid complex filters; do strict validation in the indexer."
+          ]
+        },
+        {
+          "sub_id": "sr_claims",
+          "filter": {
+            "kinds": [30078],
+            "#t": ["satsrover-claim"],
+            "#v": ["2"]
+          },
+          "notes": [
+            "Claims are tagged with satsrover-claim to avoid subscribing to all 30078 noise.",
+            "Filter by exact `#d` only when querying a specific place."
+          ]
+        },
+        {
+          "sub_id": "sr_profiles",
+          "filter": {
+            "kinds": [30078],
+            "#t": ["satsrover-profile"],
+            "#v": ["2"]
+          },
+          "notes": [
+            "Optional; only ingest if you want distributed place profile data."
+          ]
+        }
+      ]
+    },
+    "clients": {
+      "place_feed": {
+        "sub_id": "sr_place_feed",
+        "filter": {
+          "kinds": [30331],
+          "#place": ["<place_id>"],
+          "#v": ["2"],
+          "limit": 50
+        }
+      },
+      "geo_feed": {
+        "sub_id": "sr_geo_feed",
+        "filter": {
+          "kinds": [30331],
+          "#g": ["<geohash_prefixes_or_cells>"],
+          "#v": ["2"],
+          "limit": 200
+        },
+        "notes": [
+          "Use geohash cell lists (precision 5–7) rather than attempting bounding-box in Nostr.",
+          "Clients should prefer coarse geo for privacy."
+        ]
+      },
+      "place_claims": {
+        "sub_id": "sr_claim_for_place",
+        "filter": {
+          "kinds": [30078],
+          "#t": ["satsrover-claim"],
+          "#d": ["claim:<place_id>"],
+          "#v": ["2"],
+          "limit": 50
+        },
+        "notes": [
+          "Reducer semantics choose latest per (pubkey, d).",
+          "If you want a single 'active owner' per place, that is policy-layer logic."
+        ]
+      },
+      "place_profile": {
+        "sub_id": "sr_profile_for_place",
+        "filter": {
+          "kinds": [30078],
+          "#t": ["satsrover-profile"],
+          "#d": ["profile:<place_id>"],
+          "#v": ["2"],
+          "limit": 50
+        }
+      }
+    }
+  },
+  "validation": {
+    "philosophy": "Cheap prefilter first; then bounded verification; avoid expensive parsing in hot path.",
+    "global_limits": {
+      "max_tags_prefilter": 200,
+      "verification_tag_scan_limit": 64,
+      "max_tag_field_length": 200,
+      "max_content_bytes_signal": 8192,
+      "strict_created_at_integer": true,
+      "created_at_future_skew_sec": 600,
+      "created_at_max_age_sec": 2592000
+    },
+    "canonical_tag_allowlist": {
+      "30331": ["t", "v", "place", "status", "g", "client", "amount_msat", "zap", "bolt11"],
+      "30078_claim": ["t", "v", "d", "place", "role", "method", "expires", "client", "g"],
+      "30078_profile": ["t", "v", "d", "place", "client", "g"]
+    },
+    "required_tag_values": {
+      "t": ["satsrover"],
+      "v": ["2"]
+    },
+    "status_enum": ["success", "failed", "did_not_try"],
+    "geohash_rules": {
+      "enabled": true,
+      "tag": "g",
+      "allowed_precision_min": 5,
+      "allowed_precision_max": 7,
+      "allowed_charset": "0123456789bcdefghjkmnpqrstuvwxyz",
+      "max_g_tags": 1,
+      "trust_level": "hint_only",
+      "notes": [
+        "Reject if out of precision range or invalid chars.",
+        "Do not treat g as ground truth; it may be inconsistent with known place coordinates."
+      ]
+    },
+    "bitcoin_rules": {
+      "principle": "Bitcoin proofs are optional. Do not require invoice parsing in the hot path.",
+      "amount_msat": {
+        "type": "stringified_integer",
+        "max_digits": 18,
+        "validation": "digits_only"
+      },
+      "bolt11": {
+        "accepted": true,
+        "hot_path_validation": "none",
+        "notes": [
+          "Store raw bolt11 if present; validate asynchronously if needed."
+        ]
+      },
+      "zap": {
+        "accepted": true,
+        "type": "hex64",
+        "notes": [
+          "Prefer NIP-57 zaps as separate events if you later want stronger payment signals."
+        ]
+      }
+    }
+  },
+  "indexer_reducer": {
+    "overview": "Two-lane reducer: immutable history signals + replaceable state for claims/profiles.",
+    "lane_history_30331": {
+      "inputs": ["kind=30331 events passing validation + sig verification gates"],
+      "dedupe": {
+        "key": "event.id",
+        "ttl_ms": 600000
+      },
+      "outputs": [
+        {
+          "table": "signals",
+          "mode": "insert",
+          "schema": {
+            "event_id": "hex64",
+            "pubkey": "hex64",
+            "created_at": "int",
+            "place_id": "string",
+            "status": "enum",
+            "comment": "string",
+            "geohash": "optional string",
+            "amount_msat": "optional string",
+            "zap_event_id": "optional hex64",
+            "bolt11": "optional string",
+            "client": "optional string",
+            "relay": "string"
+          }
+        },
+        {
+          "table": "place_last_signal",
+          "mode": "upsert",
+          "key": "place_id",
+          "rule": "keep newest by created_at, tie-breaker by event_id"
+        },
+        {
+          "table": "signals_by_place_day",
+          "mode": "upsert_increment",
+          "key": ["place_id", "day_utc", "status"],
+          "rule": "increment count"
+        },
+        {
+          "table": "signals_by_pubkey_day",
+          "mode": "upsert_increment",
+          "key": ["pubkey", "day_utc"],
+          "rule": "increment count; used for abuse analytics"
+        }
+      ]
+    },
+    "lane_state_30078": {
+      "inputs": ["kind=30078 events passing validation + sig verification gates"],
+      "partitioning": {
+        "subtype": "derived from hashtag t (satsrover-claim / satsrover-profile) and d format"
+      },
+      "keying": {
+        "replaceable_key": ["pubkey", "d"],
+        "rule": "accept if created_at >= stored_created_at (or event_id tie-breaker)"
+      },
+      "outputs": [
+        {
+          "table": "app_state",
+          "mode": "upsert_latest",
+          "key": ["pubkey", "d"],
+          "schema": {
+            "pubkey": "hex64",
+            "d": "string",
+            "kind": "int",
+            "created_at": "int",
+            "event_id": "hex64",
+            "place_id": "string",
+            "subtype": "claim|profile",
+            "content_json": "json",
+            "relay": "string"
+          }
+        }
+      ],
+      "policy_layer_optional": {
+        "single_owner_per_place": {
+          "enabled_by_default": false,
+          "description": "If enabled, compute a winner for each place (e.g. best proof, admin allowlist, stake). This is not protocol; it is application policy."
+        }
+      }
+    }
+  },
+  "client_publishing": {
+    "signal_publish": {
+      "kind": 30331,
+      "tags_template": [
+        ["t", "satsrover"],
+        ["v", "2"],
+        ["place", "<place_id>"],
+        ["status", "<status_enum>"],
+        ["client", "<client_id>"]
+      ],
+      "optional_tags_template": [
+        ["g", "<geohash_5_to_7>"],
+        ["amount_msat", "<stringified_int>"],
+        ["zap", "<hex64>"],
+        ["bolt11", "<string>"]
+      ],
+      "content": "<short_comment>"
+    },
+    "claim_publish": {
+      "kind": 30078,
+      "tags_template": [
+        ["t", "satsrover-claim"],
+        ["t", "satsrover"],
+        ["v", "2"],
+        ["d", "claim:<place_id>"],
+        ["place", "<place_id>"],
+        ["role", "owner"],
+        ["client", "<client_id>"]
+      ],
+      "content": "{\"proofs\":[{\"type\":\"dns\",\"value\":\"example.com\"}],\"note\":\"optional\"}"
+    },
+    "profile_publish_optional": {
+      "kind": 30078,
+      "tags_template": [
+        ["t", "satsrover-profile"],
+        ["t", "satsrover"],
+        ["v", "2"],
+        ["d", "profile:<place_id>"],
+        ["place", "<place_id>"],
+        ["client", "<client_id>"]
+      ],
+      "content": "{\"name\":\"...\",\"website\":\"...\",\"lnurl\":\"...\"}"
+    }
+  },
+  "operational_guidance": {
+    "relay_friendliness": [
+      "Use low-cardinality tags for filtering (#t, #v, #place, #g).",
+      "Prefer separate hashtags for 30078 subtypes to avoid subscribing to all app_state noise.",
+      "Avoid huge content; keep proofs as references."
+    ],
+    "indexer_hot_path": [
+      "Do not parse bolt11 or verify LN payment on hot path.",
+      "Gate by strict event shape + tag allowlist + bounded loops.",
+      "Perform bounded signature verification (token bucket) before DB writes."
+    ],
+    "privacy": [
+      "If using geohash, default to precision 6 and allow 5–7 only.",
+      "Treat g as a hint; avoid requiring it."
+    ]
+  }
+}
