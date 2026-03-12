@@ -25,6 +25,11 @@ import { cn } from "@/lib/utils";
 import { useIdentity } from "@/context/identity-context";
 import { useTransmitSignalFlow } from "@/flows/transmit-signal-flow";
 import { useFlowGates } from "@/flows/gates";
+import {
+  buildCheckinConfirmPayload,
+  buildCheckinStatusParams,
+  evaluateConfirmResponseForPolling,
+} from "@/flows/checkin-correlation";
 import { NDKUserProfile } from "@nostr-dev-kit/ndk";
 import { buildAuthHeaders, randomNonce } from "@/lib/authProof";
 import IdentityGateModal from "@/components/modals/IdentityGateModal";
@@ -449,10 +454,10 @@ export default function MerchantDrawer({
       if (pollRunIdRef.current !== runId) return;
 
       try {
-        const params = new URLSearchParams({
-          checkin_id: checkinId,
+        const params = buildCheckinStatusParams({
+          checkinId,
           pubkey,
-          place_id: placeId,
+          placeId,
         });
         const resp = await fetch(`/api/checkins/status?${params.toString()}`, {
           method: "GET",
@@ -614,12 +619,16 @@ export default function MerchantDrawer({
 
     try {
       setCheckinStatus("confirming");
-      const confirmPayload = {
-        event_id: eventId,
-        place_id: merchant.id,
+      const confirmPayload = buildCheckinConfirmPayload({
+        eventId,
+        placeId: merchant.id,
         pubkey: actorPubkey,
-        payment_evidence: null,
-      };
+        paymentEvidence: null,
+        rawEvent:
+          publishResult.rawEvent && typeof publishResult.rawEvent === "object"
+            ? publishResult.rawEvent
+            : null,
+      });
       const confirmBody = JSON.stringify(confirmPayload);
       const confirmAuth = await buildAuthHeaders({
         pubkey: actorPubkey,
@@ -630,7 +639,7 @@ export default function MerchantDrawer({
         signerPreference,
       });
 
-      await fetch("/api/checkins/confirm", {
+      const confirmResp = await fetch("/api/checkins/confirm", {
         method: "POST",
         headers: {
           "content-type": "application/json",
@@ -640,8 +649,47 @@ export default function MerchantDrawer({
         },
         body: confirmBody,
       });
+      const confirmData = await confirmResp.json().catch(() => null);
+      const confirmStatus =
+        confirmData && typeof confirmData.status === "string"
+          ? confirmData.status
+          : null;
+      const confirmReason =
+        confirmData && typeof confirmData.reason_code === "string"
+          ? confirmData.reason_code
+          : null;
+      const confirmEventId =
+        confirmData && typeof confirmData.event_id === "string"
+          ? confirmData.event_id
+          : null;
+      const confirmDecision = evaluateConfirmResponseForPolling({
+        httpOk: confirmResp.ok,
+        status: confirmStatus,
+        reasonCode: confirmReason,
+        expectedEventId: eventId,
+        responseEventId: confirmEventId,
+      });
+      if (confirmDecision.next === "failed") {
+        setCheckinStatus("failed");
+        setCheckinReason(confirmDecision.reasonCode);
+        setPublishError(
+          `Confirm failed. reason_code: ${confirmDecision.reasonCode || `http_${confirmResp.status}`}`,
+        );
+        setIsPublishing(false);
+        return;
+      }
+      if (confirmDecision.next === "ok") {
+        setCheckinStatus("ok");
+        setCheckinReason(confirmDecision.reasonCode);
+        setIsPublishing(false);
+        return;
+      }
     } catch {
-      // Confirmation errors are reflected in poll status or follow-up refresh.
+      setCheckinStatus("failed");
+      setCheckinReason("confirm_request_failed");
+      setPublishError("Confirm request failed before durable handoff.");
+      setIsPublishing(false);
+      return;
     }
 
     setCheckinStatus("pending");

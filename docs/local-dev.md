@@ -70,13 +70,57 @@ export INDEXER_DATABASE_URL="postgresql://satsrover:satsrover@localhost:5432/sat
 pnpm --filter @satsrover/indexer start
 ```
 
-## 6) Optional: bulk import historical events
+`signals_v2_events` is the canonical ledger; `signals_v2_state` is a rebuildable projection.
+If projection state is stale/corrupt, rebuild from ledger:
+
+```bash
+pnpm run rebuild:signals-v2-state
+```
+
+Operator freshness surface:
+
+```bash
+curl -s http://localhost:8000/debug/signals | jq
+```
+
+If `state_rebuild_recommended` is `true`, run the rebuild command above.
+
+Verification query example:
+
+```bash
+psql -h localhost -U satsrover -d satsrover -c "SELECT count(*) AS ledger_rows FROM signals_v2_events; SELECT count(*) AS state_rows FROM signals_v2_state;"
+```
+
+## 6) Places sync job (BTCMap)
+
+One-shot local ingest:
+
+```bash
+pnpm run ingest:btcmap
+```
+
+One-shot Docker job:
+
+```bash
+docker compose run --rm places-sync
+```
+
+Recommended schedule (job-style, no always-on loop): run every 6h or daily.
+
+Quick verification after a run:
+
+```bash
+curl -s http://localhost:8000/debug/counts | jq
+curl -s "http://localhost:8000/v1/places?bbox=-89.6,13.3,-89.3,13.6&limit=20" | jq 'length'
+```
+
+## 7) Optional: bulk import historical events
 
 ```bash
 cat /path/to/events.ndjson | pnpm --filter @satsrover/indexer exec tsx src/bulk_import.ts
 ```
 
-## 7) Smoke checks
+## 8) Smoke checks
 
 ```bash
 curl -s http://localhost:8000/healthz

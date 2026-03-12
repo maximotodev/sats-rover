@@ -29,6 +29,12 @@ export default function Sidebar({ isOpen, onClose, onNavigate }: SidebarProps) {
   // Derive npub safely
   const npub = session.pubkey ? nip19.npubEncode(session.pubkey) : "";
   const displayNpub = npub ? `${npub.slice(0, 10)}...${npub.slice(-4)}` : "";
+  const profileImage = session.profile?.image || session.profile?.picture;
+  const profileDisplayName =
+    session.profile?.displayName ||
+    session.profile?.name ||
+    displayNpub ||
+    "Sovereign User";
 
   const copyNpub = () => {
     if (!npub) return;
@@ -69,10 +75,10 @@ export default function Sidebar({ isOpen, onClose, onNavigate }: SidebarProps) {
           </div>
 
           <div className="flex items-center gap-3">
-            {session.profile?.image ? (
+            {profileImage ? (
               // eslint-disable-next-line @next/next/no-img-element
               <img
-                src={session.profile.image}
+                src={profileImage}
                 className="w-12 h-12 rounded-full border border-white/10 object-cover bg-gray-800"
                 alt="Profile"
               />
@@ -84,7 +90,7 @@ export default function Sidebar({ isOpen, onClose, onNavigate }: SidebarProps) {
 
             <div className="flex-1 overflow-hidden">
               <p className="text-base font-bold text-white truncate">
-                {session.profile?.name || session.profile?.displayName || "Sovereign User"}
+                {profileDisplayName}
               </p>
 
               {/* Npub Copy */}

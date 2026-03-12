@@ -10,13 +10,14 @@ import { nip19, generateSecretKey } from "nostr-tools";
 import { getNDK } from "@/lib/ndk";
 import { storeNsec, loadNsec, clearNsec } from "@/lib/storage";
 import { hydrateUserProfile } from "@/lib/session-hydration";
+import { resolveCanonicalCheckinEventId } from "@/flows/checkin-correlation";
+import { buildCheckinSignalTags } from "@/flows/signal-tags";
 
 /**
  * PROTOCOL v1 CONSTANTS
  */
 const KIND_SIGNAL = 30331;
 const KIND_CLAIM = 30333;
-const PROTOCOL_VERSION = "1";
 
 /**
  * BROWSER-NATIVE HELPERS
@@ -175,17 +176,44 @@ export function useNostr() {
       const event = new NDKEvent(ndk);
       event.kind = KIND_SIGNAL;
       event.content = comment;
-      event.tags = [
-        ["t", "satsrover"],
-        ["place", merchantId],
-        ["status", paymentStatus],
-        ["v", PROTOCOL_VERSION],
-        ["client", "satsrover-web"],
-      ];
+      event.tags = buildCheckinSignalTags(merchantId, paymentStatus);
 
       try {
+        const provisionalEventId = typeof event.id === "string" ? event.id : null;
+        console.info("checkin_publish_start", {
+          provisional_event_id: provisionalEventId,
+          pubkey: session.pubkey || null,
+          place_id: merchantId,
+          status: paymentStatus,
+        });
+        await event.sign();
+        const signedEventId =
+          typeof event.id === "string" && event.id ? event.id : null;
         const relays = await event.publish();
-        return { ok: relays.size > 0, eventId: event.id };
+        const canonicalEventId = resolveCanonicalCheckinEventId({
+          provisionalEventId,
+          signedEventId,
+          publishedEventId: typeof event.id === "string" ? event.id : null,
+        });
+        console.info("checkin_publish_complete", {
+          event_id: canonicalEventId,
+          pubkey: session.pubkey || null,
+          place_id: merchantId,
+          status: paymentStatus,
+        });
+        return {
+          ok: relays.size > 0,
+          eventId: canonicalEventId,
+          rawEvent: {
+            id: canonicalEventId,
+            pubkey: event.pubkey,
+            created_at: event.created_at,
+            kind: event.kind,
+            tags: event.tags,
+            content: event.content,
+            sig: event.sig,
+          },
+        };
       } catch (e) {
         console.error("Signal broadcast failed", e);
         return { ok: false };
@@ -204,7 +232,14 @@ export function useNostr() {
       await event.publish();
       setSession((prev) => {
         if (prev.type === "anon") return prev;
-        const profile = { ...(prev.profile || {}), name, about, picture };
+        const profile = {
+          ...(prev.profile || {}),
+          name,
+          about,
+          picture,
+          displayName: name,
+          image: picture,
+        };
         if (prev.user) prev.user.profile = profile;
         return { ...prev, profile, user: prev.user };
       });

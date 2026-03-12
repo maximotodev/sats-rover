@@ -14,11 +14,30 @@
  * @param {HydratableUser | null | undefined} user
  * @returns {Promise<any | undefined>}
  */
+function normalizeProfile(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return undefined;
+  }
+
+  const displayName = raw.displayName || raw.display_name || raw.name;
+  const image = raw.image || raw.picture;
+
+  return {
+    ...raw,
+    displayName,
+    image,
+  };
+}
+
 export async function hydrateUserProfile(user) {
   if (!user) return undefined;
-  if (user.profile) return user.profile;
+  if (user.profile !== undefined && user.profile !== null) {
+    const profile = normalizeProfile(user.profile);
+    user.profile = profile;
+    return profile;
+  }
   try {
-    const profile = await user.fetchProfile();
+    const profile = normalizeProfile(await user.fetchProfile());
     if (profile) {
       user.profile = profile;
       return profile;

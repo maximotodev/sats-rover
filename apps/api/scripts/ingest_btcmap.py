@@ -3,6 +3,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
+from pathlib import Path
+
+if __package__ is None or __package__ == "":
+    sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from app.db.session import AsyncSessionLocal
 from app.services.ingestion_service import sync_btcmap

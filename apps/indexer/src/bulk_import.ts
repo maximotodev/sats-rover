@@ -1,3 +1,4 @@
+// apps/indexer/src/bulk_import.ts
 import { Pool } from "pg";
 import readline from "readline";
 import { processSatsRoverEvent } from "./importer.js";
@@ -5,11 +6,16 @@ import dotenv from "dotenv";
 
 dotenv.config();
 const pool = new Pool({
-  connectionString: process.env.INDEXER_DATABASE_URL || process.env.DATABASE_URL,
+  connectionString:
+    process.env.INDEXER_DATABASE_URL || process.env.DATABASE_URL,
 });
 const rl = readline.createInterface({ input: process.stdin });
 
-function log(level: "info" | "warn" | "error", msg: string, ctx: Record<string, unknown> = {}) {
+function log(
+  level: "info" | "warn" | "error",
+  msg: string,
+  ctx: Record<string, unknown> = {},
+) {
   const payload = {
     ts: new Date().toISOString(),
     level,

@@ -4,6 +4,13 @@ import dotenv from "dotenv";
 import { getEventHash, verifyEvent } from "nostr-tools";
 import { processSatsRoverEvent } from "./importer.js";
 import {
+  buildSignalAuditRecord,
+  evaluateSignalsV2EventDecision,
+  normalizeDebugSignalEventId,
+  shouldAuditSignalEvent,
+} from "./signal_event_audit.js";
+import { upsertSignalsV2StateRow } from "./signals_v2_state.js";
+import {
   dbConflictTotal,
   claimsRejectedTotal,
   claimsSeenTotal,
@@ -88,6 +95,9 @@ const SIGNALS_KIND = 30331;
 const MAX_CLAIM_D_LENGTH = 240;
 const MAX_CLAIM_CONTENT_BYTES = 4096;
 const MAX_SIGNALS_V2_CONTENT_BYTES = 4096;
+const DEBUG_SIGNAL_EVENT_ID = normalizeDebugSignalEventId(
+  process.env.DEBUG_SIGNAL_EVENT_ID,
+);
 
 const dropLogDedupe = new Set<string>();
 const pubkeyLimiter = new Map<
@@ -199,6 +209,8 @@ async function ensureSignalsV2Tables(pool: Pool): Promise<void> {
       zap TEXT NULL,
       bolt11 TEXT NULL,
       content TEXT NOT NULL,
+      raw_event JSONB NULL,
+      payment_evidence JSONB NULL,
       relay TEXT NULL,
       inserted_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )
@@ -221,6 +233,24 @@ async function ensureSignalsV2Tables(pool: Pool): Promise<void> {
       PRIMARY KEY (pubkey, place_id, day_utc)
     )
   `);
+}
+
+async function assertSignalsV2LedgerColumns(pool: Pool): Promise<void> {
+  const res = await pool.query<{ column_name: string }>(
+    `
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = current_schema()
+        AND table_name = 'signals_v2_events'
+        AND column_name IN ('raw_event', 'payment_evidence')
+    `,
+  );
+  const columns = new Set(res.rows.map((row) => row.column_name));
+  if (!columns.has("raw_event") || !columns.has("payment_evidence")) {
+    throw new Error(
+      "signals_v2_events missing required columns raw_event/payment_evidence; run alembic upgrade head",
+    );
+  }
 }
 
 async function getWatermark(pool: Pool, key: string): Promise<number> {
@@ -647,14 +677,22 @@ async function reduceSignalsV2Event(
     bolt11: string | null;
     content: string;
   },
-): Promise<"inserted" | "updated" | "ignored"> {
-  await pool.query(
+): Promise<{
+  ledgerInsert: "ok" | "ignored";
+  stateUpsert: "inserted" | "updated" | "ignored";
+}> {
+  const insertResult = await pool.query(
     `
       INSERT INTO signals_v2_events (
         event_id, pubkey, created_at, place_id, status, day_utc, g, client,
-        amount_msat, zap, bolt11, content, relay
+        amount_msat, zap, bolt11, content, raw_event, payment_evidence, relay
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+      VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+        (SELECT cs.raw_event FROM checkin_submissions cs WHERE cs.event_id = $1 LIMIT 1),
+        (SELECT cs.payment_evidence FROM checkin_submissions cs WHERE cs.event_id = $1 LIMIT 1),
+        $13
+      )
       ON CONFLICT (event_id) DO NOTHING
     `,
     [
@@ -674,51 +712,24 @@ async function reduceSignalsV2Event(
     ],
   );
 
-  const reduced = await pool.query<{ inserted: boolean }>(
-    `
-      INSERT INTO signals_v2_state (
-        pubkey, place_id, day_utc, status, created_at, event_id, g, client,
-        amount_msat, zap, bolt11, content, updated_at
-      )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
-      ON CONFLICT (pubkey, place_id, day_utc) DO UPDATE
-      SET
-        status = EXCLUDED.status,
-        created_at = EXCLUDED.created_at,
-        event_id = EXCLUDED.event_id,
-        g = EXCLUDED.g,
-        client = EXCLUDED.client,
-        amount_msat = EXCLUDED.amount_msat,
-        zap = EXCLUDED.zap,
-        bolt11 = EXCLUDED.bolt11,
-        content = EXCLUDED.content,
-        updated_at = now()
-      WHERE
-        signals_v2_state.created_at < EXCLUDED.created_at
-        OR (
-          signals_v2_state.created_at = EXCLUDED.created_at
-          AND signals_v2_state.event_id < EXCLUDED.event_id
-        )
-      RETURNING (xmax = 0) AS inserted
-    `,
-    [
-      parsed.pubkey,
-      parsed.placeId,
-      parsed.dayUtc,
-      parsed.status,
-      parsed.createdAt,
-      parsed.eventId,
-      parsed.g,
-      parsed.client,
-      parsed.amountMsat,
-      parsed.zap,
-      parsed.bolt11,
-      parsed.content,
-    ],
-  );
-
-  if (reduced.rowCount === 0) return "ignored";
-  return reduced.rows[0]?.inserted ? "inserted" : "updated";
+  const stateUpsert = await upsertSignalsV2StateRow(pool, {
+    pubkey: parsed.pubkey,
+    placeId: parsed.placeId,
+    dayUtc: parsed.dayUtc,
+    status: parsed.status,
+    createdAt: parsed.createdAt,
+    eventId: parsed.eventId,
+    g: parsed.g,
+    client: parsed.client,
+    amountMsat: parsed.amountMsat,
+    zap: parsed.zap,
+    bolt11: parsed.bolt11,
+    content: parsed.content,
+  });
+  return {
+    ledgerInsert: (insertResult.rowCount || 0) > 0 ? "ok" : "ignored",
+    stateUpsert,
+  };
 }
 
 function log(
@@ -1553,6 +1564,26 @@ function connect(url: string) {
         const event = envelope.event;
         const kindLabel = getEventKindLabel(event);
         const versionLabel = getEventVersionLabel(event);
+        const nowSec = Math.floor(nowMs / 1000);
+        const auditEvent = shouldAuditSignalEvent(event?.id, DEBUG_SIGNAL_EVENT_ID);
+        const auditDecision = auditEvent
+          ? evaluateSignalsV2EventDecision(event, nowSec)
+          : null;
+        if (auditEvent) {
+          log(
+            "info",
+            "signal_event_audit",
+            buildSignalAuditRecord({
+              stage: "relay_event_observed",
+              eventId: event.id,
+              pubkey: typeof event?.pubkey === "string" ? event.pubkey : null,
+              relay: url,
+              placeId: auditDecision?.placeId || null,
+              status: "observed",
+              reasonCode: null,
+            }),
+          );
+        }
         if (event?.kind === CLAIMS_KIND) {
           claimsSeenTotal.labels(CLAIMS_LANE).inc();
           const nowSec = Math.floor(nowMs / 1000);
@@ -1605,6 +1636,23 @@ function connect(url: string) {
         if (!prefilter.ok) {
           const reason = prefilter.reason || "prefilter_rejected";
           eventsRejectedTotal.labels(reason, kindLabel, versionLabel).inc();
+          if (auditEvent) {
+            log(
+              "warn",
+              "signal_event_audit",
+              buildSignalAuditRecord({
+                stage: "prefilter_rejected",
+                eventId:
+                  prefilter.eventId ||
+                  (typeof event?.id === "string" ? event.id : "unknown"),
+                pubkey: prefilter.pubkey || null,
+                relay: url,
+                placeId: auditDecision?.placeId || null,
+                status: "rejected",
+                reasonCode: reason,
+              }),
+            );
+          }
           if (reason === "invalid_event_id_hex") dropsInvalidIdHex += 1;
           if (reason === "invalid_pubkey_hex") dropsInvalidPubkeyHex += 1;
           if (reason === "missing_place_tag" || reason === "empty_place_tag") {
@@ -1628,6 +1676,22 @@ function connect(url: string) {
           eventsRejectedTotal.labels(reason, kindLabel, versionLabel).inc();
           dbConflictTotal.labels("duplicate_event_id").inc();
           dropsDuplicateEventId += 1;
+          if (auditEvent) {
+            log(
+              "warn",
+              "signal_event_audit",
+              buildSignalAuditRecord({
+                stage: "prefilter_rejected",
+                eventId: prefilter.eventId!,
+                pubkey: prefilter.pubkey || null,
+                relay: url,
+                placeId: auditDecision?.placeId || null,
+                status: "rejected",
+                reasonCode: reason,
+                seenInMemory: true,
+              }),
+            );
+          }
           recordDropped(url, reason, "guard", nowMs);
           maybeLogDrop({
             msg: "event_dropped_prefilter",
@@ -1638,11 +1702,25 @@ function connect(url: string) {
           });
           return;
         }
-        const nowSec = Math.floor(nowMs / 1000);
         const verificationGate = passesVerificationGate(event, nowSec);
         if (!verificationGate.ok) {
           const reason = verificationGate.reason;
           eventsRejectedTotal.labels(reason, kindLabel, versionLabel).inc();
+          if (auditEvent) {
+            log(
+              "warn",
+              "signal_event_audit",
+              buildSignalAuditRecord({
+                stage: "prefilter_rejected",
+                eventId: prefilter.eventId!,
+                pubkey: prefilter.pubkey || null,
+                relay: url,
+                placeId: auditDecision?.placeId || null,
+                status: "rejected",
+                reasonCode: reason,
+              }),
+            );
+          }
           if (reason === "invalid_kind") dropsInvalidKind += 1;
           else if (reason === "disallowed_kind") dropsDisallowedKind += 1;
           else if (reason === "invalid_created_at") dropsInvalidCreatedAt += 1;
@@ -1670,6 +1748,21 @@ function connect(url: string) {
         if (!sigGate.ok) {
           const reason = sigGate.reason;
           eventsRejectedTotal.labels(reason, kindLabel, versionLabel).inc();
+          if (auditEvent) {
+            log(
+              "warn",
+              "signal_event_audit",
+              buildSignalAuditRecord({
+                stage: "sigverify_rejected",
+                eventId: prefilter.eventId!,
+                pubkey: prefilter.pubkey || null,
+                relay: url,
+                placeId: auditDecision?.placeId || null,
+                status: "rejected",
+                reasonCode: reason,
+              }),
+            );
+          }
           if (reason === "missing_sig") dropsMissingSig += 1;
           if (reason === "invalid_sig_hex") dropsInvalidSigHex += 1;
           recordDropped(url, reason, "guard", nowMs);
@@ -1760,6 +1853,21 @@ function connect(url: string) {
         if (!signatureVerification.ok) {
           const reason = signatureVerification.reason;
           eventsRejectedTotal.labels(reason, kindLabel, versionLabel).inc();
+          if (auditEvent) {
+            log(
+              "warn",
+              "signal_event_audit",
+              buildSignalAuditRecord({
+                stage: "sigverify_rejected",
+                eventId: prefilter.eventId!,
+                pubkey: prefilter.pubkey || null,
+                relay: url,
+                placeId: auditDecision?.placeId || null,
+                status: "rejected",
+                reasonCode: reason,
+              }),
+            );
+          }
           if (reason === "sigverify_invalid_id") {
             sigverifyFailedInvalidId += 1;
           } else {
@@ -1784,6 +1892,21 @@ function connect(url: string) {
             signalsV2RejectedTotal
               .labels(SIGNALS_LANE, parsedV2.reason)
               .inc();
+            if (auditEvent) {
+              log(
+                "warn",
+                "signal_event_audit",
+                buildSignalAuditRecord({
+                  stage: "signals_v2_rejected",
+                  eventId: parsedV2.eventId || prefilter.eventId || "unknown",
+                  pubkey: prefilter.pubkey || null,
+                  relay: url,
+                  placeId: auditDecision?.placeId || null,
+                  status: "rejected",
+                  reasonCode: parsedV2.reason,
+                }),
+              );
+            }
             log("warn", "signals_v2_rejected", {
               relay: url,
               eventId: parsedV2.eventId || prefilter.eventId || "unknown",
@@ -1795,9 +1918,100 @@ function connect(url: string) {
           expensivePathInvoked += 1;
           recordAccepted(url, nowMs);
           eventsAcceptedTotal.labels(kindLabel, versionLabel).inc();
-          const reduceResult = await reduceSignalsV2Event(pool, url, parsedV2);
-          signalsV2UpsertTotal.labels(SIGNALS_LANE, reduceResult).inc();
-          if (reduceResult !== "ignored") {
+          if (auditEvent) {
+            log(
+              "info",
+              "signal_event_audit",
+              buildSignalAuditRecord({
+                stage: "ledger_insert_attempt",
+                eventId: parsedV2.eventId,
+                pubkey: parsedV2.pubkey,
+                relay: url,
+                placeId: parsedV2.placeId,
+                status: "accepted",
+                reasonCode: null,
+              }),
+            );
+          }
+          let reduceResult: {
+            ledgerInsert: "ok" | "ignored";
+            stateUpsert: "inserted" | "updated" | "ignored";
+          };
+          try {
+            reduceResult = await reduceSignalsV2Event(pool, url, parsedV2);
+          } catch (e) {
+            if (auditEvent) {
+              log(
+                "error",
+                "signal_event_audit",
+                buildSignalAuditRecord({
+                  stage: "ledger_insert_attempt",
+                  eventId: parsedV2.eventId,
+                  pubkey: parsedV2.pubkey,
+                  relay: url,
+                  placeId: parsedV2.placeId,
+                  status: "rejected",
+                  reasonCode: "accepted_but_db_write_failed",
+                }),
+              );
+            }
+            throw e;
+          }
+          if (auditEvent) {
+            log(
+              "info",
+              "signal_event_audit",
+              buildSignalAuditRecord({
+                stage:
+                  reduceResult.ledgerInsert === "ok"
+                    ? "ledger_insert_ok"
+                    : "ledger_insert_ignored",
+                eventId: parsedV2.eventId,
+                pubkey: parsedV2.pubkey,
+                relay: url,
+                placeId: parsedV2.placeId,
+                status:
+                  reduceResult.ledgerInsert === "ok" ? "accepted" : "ignored",
+                reasonCode:
+                  reduceResult.ledgerInsert === "ok"
+                    ? null
+                    : "duplicate_event_id",
+              }),
+            );
+            log(
+              "info",
+              "signal_event_audit",
+              buildSignalAuditRecord({
+                stage: "state_upsert_ok",
+                eventId: parsedV2.eventId,
+                pubkey: parsedV2.pubkey,
+                relay: url,
+                placeId: parsedV2.placeId,
+                status: reduceResult.stateUpsert,
+                reasonCode: null,
+              }),
+            );
+            if (
+              reduceResult.ledgerInsert === "ok" ||
+              reduceResult.stateUpsert !== "ignored"
+            ) {
+              log(
+                "info",
+                "signal_event_audit",
+                buildSignalAuditRecord({
+                  stage: "materialized",
+                  eventId: parsedV2.eventId,
+                  pubkey: parsedV2.pubkey,
+                  relay: url,
+                  placeId: parsedV2.placeId,
+                  status: parsedV2.status,
+                  reasonCode: null,
+                }),
+              );
+            }
+          }
+          signalsV2UpsertTotal.labels(SIGNALS_LANE, reduceResult.stateUpsert).inc();
+          if (reduceResult.stateUpsert !== "ignored") {
             await upsertWatermarkMonotonic(
               pool,
               SIGNALS_WATERMARK_KEY,
@@ -1816,7 +2030,7 @@ function connect(url: string) {
               relay: url,
               placeId: parsedV2.placeId,
               status: parsedV2.status,
-              result: reduceResult,
+              result: reduceResult.stateUpsert,
             });
           }
           return;
@@ -1923,6 +2137,7 @@ ensureIngestionStateTable(pool)
       throw err;
     }),
   )
+  .then(() => assertSignalsV2LedgerColumns(pool))
   .then(() =>
     Promise.all([
       getWatermark(pool, SIGNALS_WATERMARK_KEY),

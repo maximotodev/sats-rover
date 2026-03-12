@@ -42,6 +42,7 @@ export default function FloatingCommandBar({
   onToggleSidebar,
 }: CommandBarProps) {
   const { session } = useIdentity();
+  const profileImage = session.profile?.image || session.profile?.picture;
 
   const handleCenterClick = () => {
     if (session.type === "anon") {
@@ -112,10 +113,10 @@ export default function FloatingCommandBar({
         >
           {session.type !== "anon" ? (
             // ✅ LOGGED IN: Avatar Only
-            session.profile?.image ? (
+            profileImage ? (
               // eslint-disable-next-line @next/next/no-img-element
               <img
-                src={session.profile.image}
+                src={profileImage}
                 className="w-8 h-8 rounded-full border border-[#00FF41]/50 shadow-[0_0_10px_rgba(0,255,65,0.2)] object-cover bg-gray-800"
                 alt="Me"
               />

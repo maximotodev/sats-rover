@@ -101,7 +101,9 @@ function coerceSmallValue(v: unknown): SmallValue {
   }
 }
 
-function sanitizeTags(tags: TagRecord | null | undefined): Record<string, SmallValue> {
+function sanitizeTags(
+  tags: TagRecord | null | undefined,
+): Record<string, SmallValue> {
   if (!tags || typeof tags !== "object") return {};
 
   const out: Record<string, SmallValue> = {};
@@ -194,7 +196,9 @@ function parseBbox(raw: string | null): ParsedBbox {
 
   const parts = raw.split(",").map((x) => x.trim());
   if (parts.length !== 4) {
-    throw badRequest("bbox must be 4 comma-separated numbers: minLon,minLat,maxLon,maxLat");
+    throw badRequest(
+      "bbox must be 4 comma-separated numbers: minLon,minLat,maxLon,maxLat",
+    );
   }
 
   const nums = parts.map((x) => Number(x));
@@ -243,6 +247,7 @@ async function fetchEngineWithRetry(url: string) {
         next: { revalidate: 30 },
         headers: { accept: "application/json" },
         signal: ctrl.signal,
+        cache: "no-store",
       });
       clearTimeout(timer);
 
@@ -372,7 +377,9 @@ export async function GET(request: Request) {
     const err = asAppError(e);
     const kind = err.kind || "UNKNOWN";
     const message = err.message || "Unknown error";
-    attempts = Number.isFinite(err.attempts) ? (err.attempts as number) : attempts;
+    attempts = Number.isFinite(err.attempts)
+      ? (err.attempts as number)
+      : attempts;
 
     let status = 502;
     let error = "ENGINE_UNAVAILABLE";
@@ -422,9 +429,6 @@ export async function GET(request: Request) {
       }),
     );
 
-    return NextResponse.json(
-      { data: [], error, details },
-      { status },
-    );
+    return NextResponse.json({ data: [], error, details }, { status });
   }
 }

@@ -9,7 +9,9 @@
     "dev": "turbo dev",
     "build": "turbo build",
     "lint": "turbo lint",
-    "typecheck": "turbo typecheck"
+    "typecheck": "turbo typecheck",
+    "ingest:btcmap": "cd apps/api && .venv/bin/python -m scripts.ingest_btcmap",
+    "rebuild:signals-v2-state": "cd apps/indexer && pnpm exec tsx src/rebuild_signals_v2_state.ts"
   },
   "devDependencies": {
     "turbo": "^2.0.0"

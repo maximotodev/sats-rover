@@ -36,6 +36,7 @@ class CheckinConfirmIn(BaseModel):
     place_id: str
     pubkey: str | None = Field(default=None, pattern=HEX64)
     payment_evidence: dict | None = None
+    raw_event: dict | None = None
 
 
 class CheckinConfirmOut(BaseModel):

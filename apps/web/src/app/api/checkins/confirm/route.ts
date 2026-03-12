@@ -6,6 +6,11 @@ export async function POST(request: Request) {
   try {
     const rawBody = await request.text();
     const body = JSON.parse(rawBody || "{}");
+    const eventId =
+      body && typeof body.event_id === "string" ? body.event_id : null;
+    const pubkey = body && typeof body.pubkey === "string" ? body.pubkey : null;
+    const placeId =
+      body && typeof body.place_id === "string" ? body.place_id : null;
     const intentToken = (request.headers.get("x-checkin-intent") || body?.intentToken || "") as string;
     const authEvent = request.headers.get("x-auth-event") || "";
     const authNonce = request.headers.get("x-auth-nonce") || "";
@@ -18,6 +23,13 @@ export async function POST(request: Request) {
         { status: 401 },
       );
     }
+    console.info("checkin_confirm_proxy_start", {
+      event_id: eventId,
+      pubkey,
+      place_id: placeId,
+      status: "proxy_start",
+      checkin_intent_id: intentToken || null,
+    });
 
     const resp = await fetch(`${ENGINE_URL}/v1/checkins/confirm`, {
       method: "POST",
@@ -32,6 +44,16 @@ export async function POST(request: Request) {
     });
 
     const data = await resp.json().catch(() => null);
+    console.info("checkin_confirm_proxy_result", {
+      event_id: eventId,
+      pubkey,
+      place_id: placeId,
+      status:
+        data && typeof data.status === "string"
+          ? data.status
+          : `http_${resp.status}`,
+      checkin_intent_id: intentToken || null,
+    });
     return NextResponse.json(data ?? { message: "Confirm request failed" }, { status: resp.status });
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : "Confirm request failed";

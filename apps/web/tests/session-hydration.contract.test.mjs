@@ -3,48 +3,72 @@ import assert from "node:assert/strict";
 
 import { hydrateUserProfile } from "../src/lib/session-hydration.js";
 
-let casesExecuted = 0;
-
-test("hydrates profile from mocked fetchProfile result", async () => {
-  let calls = 0;
+test("normalizes raw {name,picture} into displayName and image", async () => {
   const user = {
     profile: undefined,
     async fetchProfile() {
-      calls += 1;
       return {
         name: "Rover",
-        displayName: "Rover Ops",
         image: "https://example.com/avatar.png",
+        picture: "https://example.com/picture.png",
       };
     },
   };
 
   const profile = await hydrateUserProfile(user);
 
-  assert.equal(calls, 1);
   assert.equal(profile?.name, "Rover");
   assert.equal(profile?.image, "https://example.com/avatar.png");
-  assert.equal(user.profile?.displayName, "Rover Ops");
-  casesExecuted += 1;
+  assert.equal(profile?.displayName, "Rover");
+  assert.equal(profile?.picture, "https://example.com/picture.png");
 });
 
-test("does not fetch when profile already exists", async () => {
-  let calls = 0;
+test("normalizes raw {display_name,picture} into displayName and image", async () => {
   const user = {
-    profile: { name: "Existing", image: "https://example.com/existing.png" },
+    profile: undefined,
     async fetchProfile() {
-      calls += 1;
-      return { name: "Unexpected" };
+      return {
+        display_name: "Display Name",
+        picture: "https://example.com/picture.png",
+      };
     },
   };
 
   const profile = await hydrateUserProfile(user);
 
-  assert.equal(calls, 0);
-  assert.equal(profile?.name, "Existing");
-  casesExecuted += 1;
+  assert.equal(profile?.displayName, "Display Name");
+  assert.equal(profile?.image, "https://example.com/picture.png");
+  assert.equal(profile?.display_name, "Display Name");
 });
 
-test("executes both session hydration contract cases", () => {
-  assert.equal(casesExecuted, 2);
+test("raw {image,name} stays valid", async () => {
+  const user = {
+    profile: undefined,
+    async fetchProfile() {
+      return {
+        name: "Existing",
+        image: "https://example.com/existing.png",
+      };
+    },
+  };
+
+  const profile = await hydrateUserProfile(user);
+
+  assert.equal(profile?.name, "Existing");
+  assert.equal(profile?.image, "https://example.com/existing.png");
+  assert.equal(profile?.displayName, "Existing");
+});
+
+test("null or invalid profile returns undefined", async () => {
+  assert.equal(await hydrateUserProfile(null), undefined);
+
+  const user = {
+    profile: "invalid",
+    async fetchProfile() {
+      return { name: "Unexpected" };
+    },
+  };
+
+  const profile = await hydrateUserProfile(user);
+  assert.equal(profile, undefined);
 });

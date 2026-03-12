@@ -9,6 +9,7 @@ import re
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, Query, Request, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -321,7 +322,19 @@ async def checkin_confirm(
         target_pubkey=payload.pubkey,
         raw_body=raw_body,
     )
-    return await confirm_checkin(db=db, intent_token=x_checkin_id, payload=payload)
+    result = await confirm_checkin(db=db, intent_token=x_checkin_id, payload=payload)
+    status = getattr(result, "status", None)
+    if status is None and isinstance(result, dict):
+        status = result.get("status")
+    if isinstance(status, str) and status in {"rejected", "failed"}:
+        if hasattr(result, "model_dump"):
+            body = result.model_dump()
+        elif hasattr(result, "dict"):
+            body = result.dict()
+        else:
+            body = result
+        return JSONResponse(status_code=409, content=body)
+    return result
 
 
 @router.get("/checkins/status", response_model=CheckinStatusOut)
