@@ -1,3 +1,4 @@
+//  apps/web/src/components/map/MapView.tsx
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -20,7 +21,7 @@ const LAYER_USER_RING = "user-location-ring";
 
 const ORANGE = "#F7931A";
 const MERCHANT_LIMIT = 600;
-const FETCH_TIMEOUT_MS = 2000;
+const FETCH_TIMEOUT_MS = 5000;
 const BBOX_DEBOUNCE_MS = 250;
 const MICRO_CACHE_TTL_MS = 5000;
 
@@ -61,9 +62,11 @@ function normalizeSource(source: unknown): MerchantSource {
 }
 
 function normalizeBbox(bounds: maplibregl.LngLatBounds): string {
-  return `${bounds.getWest().toFixed(4)},${bounds
+  return `${bounds.getWest().toFixed(3)},${bounds
     .getSouth()
-    .toFixed(4)},${bounds.getEast().toFixed(4)},${bounds.getNorth().toFixed(4)}`;
+    .toFixed(
+      3,
+    )},${bounds.getEast().toFixed(3)},${bounds.getNorth().toFixed(3)}`;
 }
 
 function zoomBucket(zoom: number): string {
@@ -74,7 +77,9 @@ function makeDataSig(merchants: Merchant[]): string {
   let hash = merchants.length * 31;
   for (let i = 0; i < merchants.length; i += 1) {
     const m = merchants[i];
-    hash = (hash * 33 + m.id.length + Math.floor((m.signalStrength ?? 0) * 100)) % 2147483647;
+    hash =
+      (hash * 33 + m.id.length + Math.floor((m.signalStrength ?? 0) * 100)) %
+      2147483647;
   }
   return `${merchants.length}:${hash}`;
 }
@@ -117,7 +122,12 @@ function userLocationFC(
   };
 }
 
-function distanceKm(aLat: number, aLon: number, bLat: number, bLon: number): number {
+function distanceKm(
+  aLat: number,
+  aLon: number,
+  bLat: number,
+  bLon: number,
+): number {
   const toRad = (v: number) => (v * Math.PI) / 180;
   const dLat = toRad(bLat - aLat);
   const dLon = toRad(bLon - aLon);
@@ -183,7 +193,17 @@ function ensureMapSourcesAndLayers(map: maplibregl.Map): void {
         "circle-stroke-color": "#FFFFFF",
         "circle-stroke-width": 2,
         "circle-stroke-opacity": 0.7,
-        "circle-radius": ["step", ["get", "point_count"], 14, 20, 18, 50, 22, 100, 28],
+        "circle-radius": [
+          "step",
+          ["get", "point_count"],
+          14,
+          20,
+          18,
+          50,
+          22,
+          100,
+          28,
+        ],
         "circle-blur": 0.2,
       },
     });
@@ -292,13 +312,19 @@ export default function MapView({
   const geolocWatchIdRef = useRef<number | null>(null);
   const lastFlyKeyRef = useRef<string>("");
 
-  const [selectedMerchant, setSelectedMerchant] = useState<Merchant | null>(null);
+  const [selectedMerchant, setSelectedMerchant] = useState<Merchant | null>(
+    null,
+  );
   const [hoverTooltip, setHoverTooltip] = useState<HoverTooltip | null>(null);
   const [isSearchingArea, setIsSearchingArea] = useState(false);
   const [mapMerchants, setMapMerchants] = useState<Merchant[]>([]);
 
-  const [locationPermission, setLocationPermission] = useState<LocationPermission>("idle");
-  const [userLocation, setUserLocation] = useState<{ lat: number; lon: number } | null>(null);
+  const [locationPermission, setLocationPermission] =
+    useState<LocationPermission>("idle");
+  const [userLocation, setUserLocation] = useState<{
+    lat: number;
+    lon: number;
+  } | null>(null);
   const [followMe, setFollowMe] = useState(false);
 
   useEffect(() => {
@@ -309,7 +335,10 @@ export default function MapView({
     onBboxChangeRef.current = onBboxChange;
   }, [onBboxChange]);
 
-  const applyMerchantDataToMap = (map: maplibregl.Map, merchants: Merchant[]): void => {
+  const applyMerchantDataToMap = (
+    map: maplibregl.Map,
+    merchants: Merchant[],
+  ): void => {
     merchantsByIdRef.current = new Map(merchants.map((m) => [m.id, m]));
     mapMerchantsRef.current = merchants;
     setMapMerchants(merchants);
@@ -317,7 +346,9 @@ export default function MapView({
     const dataSig = makeDataSig(merchants);
     if (lastDataSigRef.current === dataSig) return;
 
-    const src = map.getSource(SOURCE_ID) as maplibregl.GeoJSONSource | undefined;
+    const src = map.getSource(SOURCE_ID) as
+      | maplibregl.GeoJSONSource
+      | undefined;
     if (!src) return;
 
     src.setData(merchantsToFC(merchants));
@@ -332,9 +363,10 @@ export default function MapView({
 
   const fetchMerchantsForCurrentView = async (reason: "move" | "init") => {
     const map = mapRef.current;
-    if (!map || !map.isStyleLoaded()) return;
-
-    ensureMapSourcesAndLayers(map);
+    if (!map) return;
+    if (map.isStyleLoaded()) {
+      ensureMapSourcesAndLayers(map);
+    }
 
     const bounds = map.getBounds();
     const bbox = normalizeBbox(bounds);
@@ -369,10 +401,19 @@ export default function MapView({
         controller.signal,
       );
 
-      if (!response.ok) return;
+      if (!response.ok) {
+        console.warn("fetchMerchantsForCurrentView non-ok response", {
+          requestId,
+          bbox,
+          status: response.status,
+        });
+        return;
+      }
       const raw = await response.json().catch(() => ({}));
       const merchantsRaw =
-        typeof raw === "object" && raw !== null && Array.isArray((raw as { data?: unknown }).data)
+        typeof raw === "object" &&
+        raw !== null &&
+        Array.isArray((raw as { data?: unknown }).data)
           ? ((raw as { data: Merchant[] }).data ?? [])
           : [];
 
@@ -384,6 +425,9 @@ export default function MapView({
         dataSig: makeDataSig(merchantsRaw),
       });
 
+      if (map.isStyleLoaded()) {
+        ensureMapSourcesAndLayers(map);
+      }
       applyMerchantDataToMap(map, merchantsRaw);
     } catch (error) {
       if (!(error instanceof Error) || error.name !== "AbortError") {
@@ -407,26 +451,26 @@ export default function MapView({
     }, delay);
   };
 
-  const openMerchantByFeature = (
-    f: maplibregl.MapGeoJSONFeature,
-  ): void => {
-    const merchantId = typeof f.properties?.id === "string" ? f.properties.id : "";
-    const fromCache = merchantId ? merchantsByIdRef.current.get(merchantId) : undefined;
+  const openMerchantByFeature = (f: maplibregl.MapGeoJSONFeature): void => {
+    const merchantId =
+      typeof f.properties?.id === "string" ? f.properties.id : "";
+    const fromCache = merchantId
+      ? merchantsByIdRef.current.get(merchantId)
+      : undefined;
 
     const geometry = f.geometry as GeoJSON.Point;
     const [lon, lat] = geometry.coordinates as [number, number];
 
-    const merchant: Merchant =
-      fromCache ?? {
-        id: merchantId,
-        name: String(f.properties?.name ?? "Bitcoin Merchant"),
-        lat,
-        lon,
-        category: String(f.properties?.category ?? "merchant"),
-        source: normalizeSource(f.properties?.source),
-        signalStrength: Number(f.properties?.signalStrength ?? 0),
-        tags: {},
-      };
+    const merchant: Merchant = fromCache ?? {
+      id: merchantId,
+      name: String(f.properties?.name ?? "Bitcoin Merchant"),
+      lat,
+      lon,
+      category: String(f.properties?.category ?? "merchant"),
+      source: normalizeSource(f.properties?.source),
+      signalStrength: Number(f.properties?.signalStrength ?? 0),
+      tags: {},
+    };
 
     setSelectedMerchant(merchant);
     onInteractRef.current();
@@ -491,63 +535,85 @@ export default function MapView({
       scheduleFetch("init");
     };
 
-      const handleStyleData = () => {
-        if (!map.isStyleLoaded()) return;
-        ensureMapSourcesAndLayers(map);
-        const userSrc = map.getSource(SOURCE_USER_ID) as maplibregl.GeoJSONSource | undefined;
-        if (userSrc) {
-          userSrc.setData(userLocationFC(userLocationRef.current));
-        }
-        if (mapMerchantsRef.current.length > 0) {
-          applyMerchantDataToMap(map, mapMerchantsRef.current);
-        }
-        const selectedId = selectedMerchantRef.current?.id ?? "";
-        if (map.getLayer(LAYER_SELECTED)) {
-          map.setFilter(LAYER_SELECTED, [
-            "all",
-            ["!", ["has", "point_count"]],
-            ["==", ["get", "id"], selectedId],
-          ]);
-        }
-      };
+    const handleStyleData = () => {
+      if (!map.isStyleLoaded()) return;
+      ensureMapSourcesAndLayers(map);
+      const userSrc = map.getSource(SOURCE_USER_ID) as
+        | maplibregl.GeoJSONSource
+        | undefined;
+      if (userSrc) {
+        userSrc.setData(userLocationFC(userLocationRef.current));
+      }
+      if (mapMerchantsRef.current.length > 0) {
+        applyMerchantDataToMap(map, mapMerchantsRef.current);
+      }
+      const selectedId = selectedMerchantRef.current?.id ?? "";
+      if (map.getLayer(LAYER_SELECTED)) {
+        map.setFilter(LAYER_SELECTED, [
+          "all",
+          ["!", ["has", "point_count"]],
+          ["==", ["get", "id"], selectedId],
+        ]);
+      }
+    };
 
     const handleMoveEnd = () => {
       setHoverTooltip(null);
       scheduleFetch("move");
     };
 
-    const handleClusterClick = async (e: maplibregl.MapMouseEvent & { features?: maplibregl.MapGeoJSONFeature[] }) => {
+    const handleClusterClick = async (
+      e: maplibregl.MapMouseEvent & {
+        features?: maplibregl.MapGeoJSONFeature[];
+      },
+    ) => {
       const f = e.features?.[0];
       if (!f) return;
       const clusterId = f.properties?.cluster_id;
       if (clusterId == null) return;
-      const source = map.getSource(SOURCE_ID) as maplibregl.GeoJSONSource | undefined;
+      const source = map.getSource(SOURCE_ID) as
+        | maplibregl.GeoJSONSource
+        | undefined;
       if (!source) return;
 
       try {
         const zoom = await source.getClusterExpansionZoom(clusterId);
-        const [lng, lat] = (f.geometry as GeoJSON.Point).coordinates as [number, number];
+        const [lng, lat] = (f.geometry as GeoJSON.Point).coordinates as [
+          number,
+          number,
+        ];
         map.easeTo({ center: [lng, lat], zoom, duration: 350 });
       } catch (err) {
         console.error("cluster zoom failed", err);
       }
     };
 
-    const handlePointClick = (e: maplibregl.MapMouseEvent & { features?: maplibregl.MapGeoJSONFeature[] }) => {
+    const handlePointClick = (
+      e: maplibregl.MapMouseEvent & {
+        features?: maplibregl.MapGeoJSONFeature[];
+      },
+    ) => {
       const f = e.features?.[0];
       if (!f) return;
       openMerchantByFeature(f);
     };
 
-    const handlePointMove = (e: maplibregl.MapMouseEvent & { features?: maplibregl.MapGeoJSONFeature[] }) => {
+    const handlePointMove = (
+      e: maplibregl.MapMouseEvent & {
+        features?: maplibregl.MapGeoJSONFeature[];
+      },
+    ) => {
       const f = e.features?.[0];
       if (!f) {
         setHoverTooltip(null);
         return;
       }
 
-      const merchantId = typeof f.properties?.id === "string" ? f.properties.id : "";
-      const merchant = merchantId ? merchantsByIdRef.current.get(merchantId) : undefined;
+      const merchantId =
+        typeof f.properties?.id === "string" ? f.properties.id : "";
+      const merchant = merchantId
+        ? merchantsByIdRef.current.get(merchantId)
+        : undefined;
       if (!merchant) {
         setHoverTooltip(null);
         return;
@@ -646,7 +712,9 @@ export default function MapView({
     userLocationRef.current = userLocation;
     const map = mapRef.current;
     if (!map || !map.isStyleLoaded()) return;
-    const src = map.getSource(SOURCE_USER_ID) as maplibregl.GeoJSONSource | undefined;
+    const src = map.getSource(SOURCE_USER_ID) as
+      | maplibregl.GeoJSONSource
+      | undefined;
     if (src) {
       src.setData(userLocationFC(userLocation));
     }
@@ -672,7 +740,11 @@ export default function MapView({
         setUserLocation(next);
         const map = mapRef.current;
         if (map) {
-          map.easeTo({ center: [next.lon, next.lat], duration: 600, essential: true });
+          map.easeTo({
+            center: [next.lon, next.lat],
+            duration: 600,
+            essential: true,
+          });
         }
       },
       () => {
@@ -697,8 +769,10 @@ export default function MapView({
 
   const nearbyCount = useMemo(() => {
     if (!userLocation) return 0;
-    return mapMerchants.filter((m) => distanceKm(userLocation.lat, userLocation.lon, m.lat, m.lon) <= 2.0)
-      .length;
+    return mapMerchants.filter(
+      (m) =>
+        distanceKm(userLocation.lat, userLocation.lon, m.lat, m.lon) <= 2.0,
+    ).length;
   }, [mapMerchants, userLocation]);
 
   const smartTop3 = useMemo(() => {
@@ -721,7 +795,9 @@ export default function MapView({
   }, [mapMerchants]);
 
   const showGeoBanner =
-    locationPermission === "idle" && userLocation === null && selectedMerchant === null;
+    locationPermission === "idle" &&
+    userLocation === null &&
+    selectedMerchant === null;
 
   const handleLocateMe = () => {
     if (userLocation) {
@@ -759,7 +835,10 @@ export default function MapView({
     "AI Nearby Picks will summarize nearby high-signal merchants in a future update.";
 
   return (
-    <div className="w-full h-full relative bg-[#050505]" onKeyDown={handleKeyDown}>
+    <div
+      className="w-full h-full relative bg-[#050505]"
+      onKeyDown={handleKeyDown}
+    >
       <div
         ref={mapContainer}
         className="absolute inset-0"
@@ -836,7 +915,9 @@ export default function MapView({
       {smartTop3.length > 0 && (
         <div className="absolute bottom-24 right-4 z-20 w-64 rounded-lg bg-black/80 border border-white/15 p-3 text-xs font-mono text-gray-200">
           <div className="flex items-center justify-between mb-2">
-            <p className="uppercase tracking-widest text-[10px] text-[#F7931A]">Smart Explore</p>
+            <p className="uppercase tracking-widest text-[10px] text-[#F7931A]">
+              Smart Explore
+            </p>
             <button
               disabled
               title={aiNearbyHint}
@@ -852,13 +933,20 @@ export default function MapView({
                 onClick={() => {
                   setSelectedMerchant(merchant);
                   onInteractRef.current();
-                  mapRef.current?.easeTo({ center: [merchant.lon, merchant.lat], duration: 400 });
+                  mapRef.current?.easeTo({
+                    center: [merchant.lon, merchant.lat],
+                    duration: 400,
+                  });
                 }}
                 className="w-full text-left p-2 rounded border border-white/10 hover:border-[#F7931A]/50 hover:bg-white/5"
               >
                 <div className="flex items-center justify-between">
-                  <span className="truncate">{idx + 1}. {merchant.name}</span>
-                  <span className="text-[#F7931A]">{Math.round((merchant.signalStrength ?? 0) * 100)}</span>
+                  <span className="truncate">
+                    {idx + 1}. {merchant.name}
+                  </span>
+                  <span className="text-[#F7931A]">
+                    {Math.round((merchant.signalStrength ?? 0) * 100)}
+                  </span>
                 </div>
                 <p className="text-[10px] text-gray-500 truncate">
                   {(merchant.category ?? "merchant").replaceAll("_", " ")}
@@ -876,13 +964,22 @@ export default function MapView({
         >
           <p className="font-bold truncate">{hoverTooltip.merchant.name}</p>
           <p className="text-gray-400 truncate">
-            {(hoverTooltip.merchant.category ?? "merchant").replaceAll("_", " ")}
+            {(hoverTooltip.merchant.category ?? "merchant").replaceAll(
+              "_",
+              " ",
+            )}
           </p>
-          <p className="text-[#F7931A]">Signal {Math.round((hoverTooltip.merchant.signalStrength ?? 0) * 100)}</p>
+          <p className="text-[#F7931A]">
+            Signal{" "}
+            {Math.round((hoverTooltip.merchant.signalStrength ?? 0) * 100)}
+          </p>
         </div>
       )}
 
-      <MerchantDrawer merchant={selectedMerchant} onClose={closeMerchantDrawer} />
+      <MerchantDrawer
+        merchant={selectedMerchant}
+        onClose={closeMerchantDrawer}
+      />
     </div>
   );
 }

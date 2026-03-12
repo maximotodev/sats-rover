@@ -29,6 +29,20 @@ services:
       timeout: 5s
       retries: 10
 
+  places-sync:
+    build:
+      context: ./apps/api
+    environment:
+      DATABASE_URL: postgresql+asyncpg://satsrover:satsrover@postgres:5432/satsrover
+      REDIS_URL: redis://redis:6379/0
+      APP_ENV: local
+      CORS_ORIGINS: http://localhost:3000
+      PLACES_CACHE_TTL_SECONDS: 15
+    command: ["sh", "-c", "alembic upgrade head && python -m scripts.ingest_btcmap"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   satsrover_postgres_data:
   satsrover_redis_data:

@@ -86,6 +86,58 @@ function rememberUnresolvedLegacyPlaceId(raw: string): void {
   unresolvedLegacyPlaceIds.add(raw);
 }
 
+async function setSubmissionConfirmedIfV2Ingested(
+  pool: Pool,
+  eventId: string,
+  mutationSource: string,
+): Promise<void> {
+  const v2Check = await pool.query<{ one: number }>(
+    `
+      SELECT 1 AS one
+      FROM signals_v2_events
+      WHERE event_id = $1
+      LIMIT 1
+    `,
+    [eventId],
+  );
+  const legacyCheck = await pool.query<{ one: number }>(
+    `
+      SELECT 1 AS one
+      FROM signals
+      WHERE event_id = $1
+      LIMIT 1
+    `,
+    [eventId],
+  );
+  const v2CheckResult = (v2Check.rowCount || 0) > 0;
+  const legacyCheckResult = (legacyCheck.rowCount || 0) > 0;
+  if (!v2CheckResult) {
+    log("warn", "checkin_confirmed_mutation_skipped", {
+      mutation_source: mutationSource,
+      event_id: eventId,
+      reason_code: "v2_ledger_missing",
+      v2_check_result: v2CheckResult,
+      legacy_check_result: legacyCheckResult,
+    });
+    return;
+  }
+  await pool.query(
+    `
+      UPDATE checkin_submissions
+      SET status = 'confirmed', confirmed_at = now()
+      WHERE event_id = $1 AND status = 'pending'
+    `,
+    [eventId],
+  );
+  log("info", "checkin_confirmed_mutation_applied", {
+    mutation_source: mutationSource,
+    event_id: eventId,
+    reason_code: "v2_ledger_present",
+    v2_check_result: v2CheckResult,
+    legacy_check_result: legacyCheckResult,
+  });
+}
+
 async function canonicalizePlaceId(
   pool: Pool,
   raw: string,
@@ -208,24 +260,18 @@ export async function processSatsRoverEvent(pool: Pool, event: Event) {
     ]);
 
     if (res.rowCount && res.rowCount > 0) {
-      await pool.query(
-        `
-          UPDATE checkin_submissions
-          SET status = 'confirmed', confirmed_at = now()
-          WHERE event_id = $1 AND status = 'pending'
-        `,
-        [event.id],
+      await setSubmissionConfirmedIfV2Ingested(
+        pool,
+        event.id,
+        "importer_legacy_inserted_signal",
       );
       return { placeId, status };
     }
 
-    await pool.query(
-      `
-        UPDATE checkin_submissions
-        SET status = 'confirmed', confirmed_at = now()
-        WHERE event_id = $1 AND status = 'pending'
-      `,
-      [event.id],
+    await setSubmissionConfirmedIfV2Ingested(
+      pool,
+      event.id,
+      "importer_legacy_noop",
     );
     return null;
   } catch (err: any) {

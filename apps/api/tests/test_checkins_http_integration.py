@@ -10,6 +10,7 @@ from fastapi import FastAPI
 import httpx
 
 from app.api.v1 import checkins as checkins_route
+from app.schemas.signal import CheckinConfirmOut
 
 
 def _sha256_hex(raw: bytes) -> str:
@@ -134,6 +135,63 @@ class CheckinsHttpIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ok_resp.status_code, 200)
         self.assertEqual(ok_resp.json().get("status"), "ok")
         self.assertIsNone(ok_resp.json().get("reason_code"))
+
+    async def test_confirm_returns_409_when_service_rejected(self):
+        payload = {
+            "event_id": "a" * 64,
+            "place_id": "btcmap:abc",
+            "pubkey": "b" * 64,
+            "payment_evidence": None,
+            "raw_event": None,
+        }
+
+        async def _enforce_auth_ok(*args, **kwargs):
+            return payload["pubkey"]
+
+        async def _confirm_rejected(**kwargs):
+            return CheckinConfirmOut(
+                status="rejected",
+                reason_code="submission_commit_failed",
+                event_id=payload["event_id"],
+            )
+
+        with patch("app.api.v1.checkins._enforce_checkins_auth_proof", new=_enforce_auth_ok), patch(
+            "app.api.v1.checkins.confirm_checkin",
+            new=_confirm_rejected,
+        ):
+            resp = await self.client.post("/v1/checkins/confirm", json=payload)
+
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(resp.json().get("status"), "rejected")
+        self.assertEqual(resp.json().get("reason_code"), "submission_commit_failed")
+
+    async def test_confirm_keeps_200_when_service_pending(self):
+        payload = {
+            "event_id": "c" * 64,
+            "place_id": "btcmap:abc",
+            "pubkey": "d" * 64,
+            "payment_evidence": None,
+            "raw_event": None,
+        }
+
+        async def _enforce_auth_ok(*args, **kwargs):
+            return payload["pubkey"]
+
+        async def _confirm_pending(**kwargs):
+            return CheckinConfirmOut(
+                status="pending",
+                reason_code="indexing_delay",
+                event_id=payload["event_id"],
+            )
+
+        with patch("app.api.v1.checkins._enforce_checkins_auth_proof", new=_enforce_auth_ok), patch(
+            "app.api.v1.checkins.confirm_checkin",
+            new=_confirm_pending,
+        ):
+            resp = await self.client.post("/v1/checkins/confirm", json=payload)
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json().get("status"), "pending")
 
 
 if __name__ == "__main__":

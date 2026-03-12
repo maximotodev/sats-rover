@@ -4,10 +4,13 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import time
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
@@ -18,25 +21,47 @@ BATCH_SIZE = 1000
 MAX_ID_LEN = 128
 MAX_NAME_LEN = 256
 DEFAULT_GLOW = 0.5
+PROGRESS_EVERY_BATCHES = 5
+INGESTION_STATE_KEY_PLACES_BTCMAP = "places_btcmap"
 
 UPSERT_SQL = text("""
-    INSERT INTO places (id, name, source, tags, location, glow_score)
+    INSERT INTO places (id, name, source, tags, location, glow_score, ingest_hash)
     VALUES (
         :id,
         :name,
         :source,
-        CAST(:tags AS JSON),
+        :tags,
         ST_SetSRID(ST_MakePoint(:lon, :lat), 4326)::geography,
-        :glow
+        :glow,
+        :ingest_hash
     )
     ON CONFLICT (id) DO UPDATE SET
-        name = EXCLUDED.name,
+        name = CASE
+            WHEN EXCLUDED.name = '' THEN places.name
+            WHEN EXCLUDED.name LIKE 'Unnamed Place (%)'
+              AND places.name IS NOT NULL
+              AND btrim(places.name) <> ''
+              AND places.name NOT LIKE 'Unnamed Place (%)'
+            THEN places.name
+            ELSE EXCLUDED.name
+        END,
         source = EXCLUDED.source,
         tags = EXCLUDED.tags,
         location = EXCLUDED.location,
-        glow_score = EXCLUDED.glow_score,
+        ingest_hash = EXCLUDED.ingest_hash,
+        updated_at = now()
+    WHERE places.ingest_hash IS DISTINCT FROM EXCLUDED.ingest_hash;
+""").bindparams(bindparam("tags", type_=JSONB))
+
+UPSERT_INGESTION_STATE_SQL = text("""
+    INSERT INTO ingestion_state (key, value, value_json, updated_at)
+    VALUES (:key, :value, :value_json, now())
+    ON CONFLICT (key) DO UPDATE
+    SET
+        value = EXCLUDED.value,
+        value_json = EXCLUDED.value_json,
         updated_at = now();
-""")
+""").bindparams(bindparam("value_json", type_=JSONB))
 
 
 def _safe_float(v: Any) -> float | None:
@@ -141,8 +166,64 @@ def _pick_name(osm_json: dict[str, Any], tags: dict[str, Any], raw_id: Any) -> s
     return f"Unnamed Place ({raw_id})"[:MAX_NAME_LEN]
 
 
+def _build_ingest_hash(
+    *,
+    name: str,
+    lat: float,
+    lon: float,
+    tags: dict[str, Any],
+    source: str,
+) -> str:
+    canonical_tags = json.dumps(tags, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    payload = f"{name}|{lat:.7f}|{lon:.7f}|{source}|{canonical_tags}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _build_places_sync_state_payload(
+    *,
+    fetched_count: int,
+    parsed_count: int,
+    upserted_count: int,
+    unchanged_skipped_count: int,
+    duration_ms: int,
+) -> dict[str, Any]:
+    return {
+        "last_places_sync_at": datetime.now(timezone.utc).isoformat(),
+        "fetched_count": fetched_count,
+        "parsed_count": parsed_count,
+        "upserted_count": upserted_count,
+        "unchanged_skipped_count": unchanged_skipped_count,
+        "duration_ms": duration_ms,
+    }
+
+
+async def _persist_places_sync_state(
+    db: AsyncSession,
+    payload: dict[str, Any],
+) -> None:
+    last_places_sync_at = payload.get("last_places_sync_at")
+    epoch_seconds = int(datetime.now(timezone.utc).timestamp())
+    if isinstance(last_places_sync_at, str):
+        try:
+            epoch_seconds = int(
+                datetime.fromisoformat(last_places_sync_at).timestamp(),
+            )
+        except ValueError:
+            epoch_seconds = int(datetime.now(timezone.utc).timestamp())
+    await db.execute(
+        UPSERT_INGESTION_STATE_SQL,
+        {
+            "key": INGESTION_STATE_KEY_PLACES_BTCMAP,
+            "value": epoch_seconds,
+            "value_json": payload,
+        },
+    )
+    await db.commit()
+
+
 async def sync_btcmap(db: AsyncSession) -> int:
-    logger.info("BTC Map sync start. Target: %s", BTCMAP_URL)
+    started_at = time.perf_counter()
+    logger.info("btcmap_sync_start", extra={"target": BTCMAP_URL})
 
     async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
         r = await client.get(BTCMAP_URL)
@@ -150,16 +231,21 @@ async def sync_btcmap(db: AsyncSession) -> int:
         elements = r.json()
 
     if not isinstance(elements, list):
-        logger.error("Unexpected payload type: %s", type(elements))
+        logger.error("btcmap_sync_unexpected_payload", extra={"payload_type": str(type(elements))})
         return 0
 
-    logger.info("Retrieved %s potential elements. Parsing...", len(elements))
+    fetched_count = len(elements)
+    logger.info("btcmap_sync_fetched", extra={"fetched_count": fetched_count})
 
-    total = 0
+    parsed_count = 0
+    upserted_count = 0
+    unchanged_skipped_count = 0
+    batch_count = 0
     batch_params: list[dict[str, Any]] = []
 
     skipped_no_id = 0
     skipped_no_coords = 0
+    skipped_invalid_coords = 0
     skipped_not_dict = 0
 
     for el in elements:
@@ -179,43 +265,91 @@ async def sync_btcmap(db: AsyncSession) -> int:
             continue
 
         if not (-90 <= lat <= 90 and -180 <= lon <= 180):
-            skipped_no_coords += 1
+            skipped_invalid_coords += 1
             continue
 
         # ✅ Merge tags from both places (top-level + nested)
         tags = _merge_tags(osm_json.get("tags"), el.get("tags"))
 
         name = _pick_name(osm_json, tags, raw_id)
+        ingest_hash = _build_ingest_hash(
+            name=name,
+            lat=lat,
+            lon=lon,
+            tags=tags,
+            source="btcmap",
+        )
 
         batch_params.append(
             {
                 "id": _canonical_id(raw_id),
                 "name": name,
                 "source": "btcmap",
-                "tags": json.dumps(tags, ensure_ascii=False),
+                "tags": tags,
                 "lon": lon,
                 "lat": lat,
                 "glow": DEFAULT_GLOW,
+                "ingest_hash": ingest_hash,
             }
         )
+        parsed_count += 1
 
         if len(batch_params) >= BATCH_SIZE:
-            await db.execute(UPSERT_SQL, batch_params)
+            result = await db.execute(UPSERT_SQL, batch_params)
             await db.commit()
-            total += len(batch_params)
-            logger.info("Progress: %s upserted", total)
+            affected = int(result.rowcount or 0)
+            upserted_count += affected
+            unchanged_skipped_count += max(0, len(batch_params) - affected)
+            batch_count += 1
+            if batch_count % PROGRESS_EVERY_BATCHES == 0:
+                logger.info(
+                    "btcmap_sync_progress",
+                    extra={
+                        "fetched_count": fetched_count,
+                        "parsed_count": parsed_count,
+                        "upserted_count": upserted_count,
+                        "unchanged_skipped_count": unchanged_skipped_count,
+                        "skipped_not_dict": skipped_not_dict,
+                        "skipped_no_id": skipped_no_id,
+                        "skipped_no_coords": skipped_no_coords,
+                        "skipped_invalid_coords": skipped_invalid_coords,
+                        "batches_completed": batch_count,
+                    },
+                )
             batch_params = []
 
     if batch_params:
-        await db.execute(UPSERT_SQL, batch_params)
+        result = await db.execute(UPSERT_SQL, batch_params)
         await db.commit()
-        total += len(batch_params)
+        affected = int(result.rowcount or 0)
+        upserted_count += affected
+        unchanged_skipped_count += max(0, len(batch_params) - affected)
+        batch_count += 1
 
-    logger.info(
-        "Sync complete. Upserted=%s skipped_not_dict=%s skipped_no_id=%s skipped_no_coords=%s",
-        total,
-        skipped_not_dict,
-        skipped_no_id,
-        skipped_no_coords,
+    duration_ms = int((time.perf_counter() - started_at) * 1000)
+    await _persist_places_sync_state(
+        db,
+        _build_places_sync_state_payload(
+            fetched_count=fetched_count,
+            parsed_count=parsed_count,
+            upserted_count=upserted_count,
+            unchanged_skipped_count=unchanged_skipped_count,
+            duration_ms=duration_ms,
+        ),
     )
-    return total
+    logger.info(
+        "btcmap_sync_complete",
+        extra={
+            "fetched_count": fetched_count,
+            "parsed_count": parsed_count,
+            "upserted_count": upserted_count,
+            "unchanged_skipped_count": unchanged_skipped_count,
+            "skipped_not_dict": skipped_not_dict,
+            "skipped_no_id": skipped_no_id,
+            "skipped_no_coords": skipped_no_coords,
+            "skipped_invalid_coords": skipped_invalid_coords,
+            "batches_completed": batch_count,
+            "duration_ms": duration_ms,
+        },
+    )
+    return upserted_count
