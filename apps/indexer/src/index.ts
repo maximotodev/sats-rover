@@ -2,7 +2,10 @@ import { WebSocket } from "ws";
 import { Pool } from "pg";
 import dotenv from "dotenv";
 import { getEventHash, verifyEvent } from "nostr-tools";
-import { processSatsRoverEvent } from "./importer.js";
+import {
+  buildLiveSignalsReqFilter,
+  evaluateLiveSignalCompatibility,
+} from "./live_signal_policy.js";
 import {
   buildSignalAuditRecord,
   evaluateSignalsV2EventDecision,
@@ -23,9 +26,6 @@ import {
   signalsV2SeenTotal,
   signalsV2UpsertTotal,
   startMetricsServer,
-  v2SeenTotal,
-  v2SoftInvalidTotal,
-  v2SoftUnknownTagTotal,
   watermarkUpdatesTotal,
   watermarkValue,
   wsReconnectTotal,
@@ -1505,7 +1505,7 @@ function connect(url: string) {
       JSON.stringify([
         "REQ",
         "sr_live",
-        { kinds: [30331], "#t": ["satsrover"], since: signalsSinceCreatedAt },
+        buildLiveSignalsReqFilter(signalsSinceCreatedAt),
       ]),
     );
     log("info", "relay_subscribe", {
@@ -1885,6 +1885,40 @@ function connect(url: string) {
         }
         sigverifyPassed += 1;
 
+        const liveSignalCompatibility = evaluateLiveSignalCompatibility(
+          kindLabel,
+          versionLabel,
+        );
+        if (!liveSignalCompatibility.ok) {
+          eventsRejectedTotal
+            .labels(liveSignalCompatibility.reason, kindLabel, versionLabel)
+            .inc();
+          if (auditEvent) {
+            log(
+              "warn",
+              "signal_event_audit",
+              buildSignalAuditRecord({
+                stage: "signals_v2_rejected",
+                eventId: prefilter.eventId || "unknown",
+                pubkey: prefilter.pubkey || null,
+                relay: url,
+                placeId: auditDecision?.placeId || null,
+                status: "rejected",
+                reasonCode: liveSignalCompatibility.reason,
+              }),
+            );
+          }
+          recordDropped(url, liveSignalCompatibility.reason, "guard", nowMs);
+          maybeLogDrop({
+            msg: "event_dropped_prefilter",
+            reason: liveSignalCompatibility.reason,
+            pubkey: prefilter.pubkey,
+            eventId: prefilter.eventId,
+            relay: url,
+          });
+          return;
+        }
+
         if (kindLabel === String(SIGNALS_KIND) && versionLabel === "2") {
           signalsV2SeenTotal.labels(SIGNALS_LANE).inc();
           const parsedV2 = parseSignalsV2EventStrict(event, nowSec);
@@ -2034,44 +2068,6 @@ function connect(url: string) {
             });
           }
           return;
-        }
-
-        if (kindLabel === "30331" && versionLabel === "2") {
-          v2SeenTotal.labels(SIGNALS_LANE).inc();
-          const softV2 = validateSignalsV2Soft(event);
-          for (const reason of softV2.reasons) {
-            v2SoftInvalidTotal.labels(SIGNALS_LANE, reason).inc();
-          }
-          for (const tag of softV2.unknownTags) {
-            v2SoftUnknownTagTotal.labels(SIGNALS_LANE, tag).inc();
-          }
-          if (softV2.firstReason) {
-            log("warn", "v2_soft_validation_failed", {
-              relay: url,
-              url,
-              eventId: prefilter.eventId,
-              reason: softV2.firstReason,
-            });
-          }
-        }
-
-        expensivePathInvoked += 1;
-        recordAccepted(url, nowMs);
-        eventsAcceptedTotal.labels(kindLabel, versionLabel).inc();
-        const result = await processSatsRoverEvent(pool, event);
-        await upsertWatermarkMonotonic(pool, SIGNALS_WATERMARK_KEY, event.created_at);
-        const previousWatermark = cachedSignalsWatermarkSec;
-        cachedSignalsWatermarkSec = Math.max(cachedSignalsWatermarkSec, event.created_at);
-        watermarkValue.labels(SIGNALS_LANE).set(cachedSignalsWatermarkSec);
-        if (cachedSignalsWatermarkSec > previousWatermark) {
-          watermarkUpdatesTotal.labels(SIGNALS_LANE).inc();
-        }
-        if (result) {
-          log("info", "signal_ingested", {
-            relay: url,
-            placeId: result.placeId,
-            status: result.status,
-          });
         }
       }
     } catch (e: any) {
