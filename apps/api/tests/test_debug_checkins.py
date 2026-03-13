@@ -150,6 +150,39 @@ class DebugCheckinsTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(body["durable_trace_exists"])
         self.assertFalse(body["ephemeral_trace_exists"])
 
+    async def test_fully_confirmed_normalizes_stale_pending_redis_state(self):
+        event_id = "5" * 64
+        conn = _FakeConn(
+            ledger_by_event={
+                event_id: {
+                    "event_id": event_id,
+                    "pubkey": "6" * 64,
+                    "place_id": "btcmap:stale",
+                    "status": "success",
+                    "created_at": 1700000000,
+                    "day_utc": 19675,
+                }
+            }
+        )
+        redis = _FakeRedis(
+            {
+                f"checkin:pending:{event_id}": b'{"state":"pending","reason_code":"indexing_delay"}',
+                f"checkin:meta:{event_id}": b'{"place_id":"btcmap:stale","pubkey":"' + ("6" * 64).encode() + b'"}',
+                f"checkin:probe:{event_id}": b"1700000000",
+            }
+        )
+        with patch("app.main.engine", new=_FakeEngine(conn)), patch(
+            "app.main.redis_client", new=redis
+        ):
+            resp = await self.client.get(f"/debug/checkins/{event_id}")
+
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["diagnosis"]["code"], "ledger_seen_state_pending")
+        self.assertFalse(body["ephemeral_trace_exists"])
+        self.assertEqual(body["redis"]["pending"]["state"], "ok")
+        self.assertEqual(body["redis"]["pending"]["reason_code"], "confirmed")
+
     async def test_duplicate_resolved(self):
         event_id = "e" * 64
         winner_event_id = "f" * 64
@@ -176,7 +209,68 @@ class DebugCheckinsTests(unittest.IsolatedAsyncioTestCase):
         body = resp.json()
         self.assertEqual(body["diagnosis"]["code"], "duplicate_same_day_winner_elsewhere")
         self.assertEqual(body["duplicate_same_day"]["winner_event_id"], winner_event_id)
+        self.assertEqual(body["duplicate_same_day"]["duplicate_state"], "winner_elsewhere")
         self.assertTrue(body["duplicate_same_day"]["duplicate_event_id_prefilter_likely"])
+
+    async def test_duplicate_self_winner_with_ledger_is_not_anomaly(self):
+        event_id = "1" * 64
+        conn = _FakeConn(
+            submission_by_event={
+                event_id: {
+                    "status": "pending",
+                    "reason_code": "indexing_delay",
+                    "place_id": "btcmap:self",
+                    "pubkey": "2" * 64,
+                    "confirmed_at": None,
+                }
+            },
+            ledger_by_event={
+                event_id: {
+                    "event_id": event_id,
+                    "pubkey": "2" * 64,
+                    "place_id": "btcmap:self",
+                    "status": "success",
+                    "created_at": 1700000000,
+                    "day_utc": 19675,
+                }
+            },
+            duplicate_winner_by_key={("2" * 64, "btcmap:self"): event_id},
+        )
+        with patch("app.main.engine", new=_FakeEngine(conn)), patch(
+            "app.main.redis_client", new=_FakeRedis()
+        ):
+            resp = await self.client.get(f"/debug/checkins/{event_id}")
+
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["diagnosis"]["code"], "ledger_seen_state_pending")
+        self.assertEqual(body["duplicate_same_day"]["duplicate_state"], "self_winner")
+        self.assertFalse(body["duplicate_same_day"]["duplicate_event_id_prefilter_likely"])
+
+    async def test_duplicate_self_winner_without_ledger_is_waiting(self):
+        event_id = "3" * 64
+        conn = _FakeConn(
+            submission_by_event={
+                event_id: {
+                    "status": "pending",
+                    "reason_code": "indexing_delay",
+                    "place_id": "btcmap:self2",
+                    "pubkey": "4" * 64,
+                    "confirmed_at": None,
+                }
+            },
+            duplicate_winner_by_key={("4" * 64, "btcmap:self2"): event_id},
+        )
+        with patch("app.main.engine", new=_FakeEngine(conn)), patch(
+            "app.main.redis_client", new=_FakeRedis()
+        ):
+            resp = await self.client.get(f"/debug/checkins/{event_id}")
+
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["diagnosis"]["code"], "raw_event_missing_from_submission")
+        self.assertEqual(body["duplicate_same_day"]["duplicate_state"], "self_winner")
+        self.assertFalse(body["duplicate_same_day"]["duplicate_event_id_prefilter_likely"])
 
     async def test_ledger_seen_state_pending(self):
         event_id = "9" * 64
@@ -318,6 +412,9 @@ class DebugCheckinsTests(unittest.IsolatedAsyncioTestCase):
         body = resp.json()
         self.assertEqual(body["diagnosis"]["code"], "ledger_missing_after_confirm")
         self.assertFalse(body["diagnosis"]["state_rebuild_recommended"])
+        self.assertFalse(body["v2_ingested"])
+        self.assertFalse(body["legacy_ingested"])
+        self.assertFalse(body["status_semantics_consistent"])
 
     async def test_legacy_only_ingested_is_flagged_inconsistent(self):
         event_id = "9" * 64

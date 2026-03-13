@@ -445,7 +445,13 @@ async def debug_checkin(event_id: str):
     legacy_exists = legacy is not None
     state_exists = state is not None
     durable_trace_exists = submission_exists or ledger_exists
-    ephemeral_trace_exists = pending_exists or meta_exists or probe_exists
+    if ledger_exists and pending_state == "pending":
+        pending_state = "ok"
+        pending_reason_code = "confirmed"
+    ephemeral_trace_exists = (
+        (pending_exists or meta_exists or probe_exists)
+        and not ledger_exists
+    )
     state_event_id = _safe_str(state.get("event_id")) if state else None
     ledger_created_at = _safe_int(ledger.get("created_at")) if ledger else None
     state_created_at = _safe_int(state.get("created_at")) if state else None
@@ -476,13 +482,18 @@ async def debug_checkin(event_id: str):
     status_semantics_consistent = not (
         submission_status == "confirmed" and not ledger_exists
     )
+    duplicate_state = "none"
+    if duplicate_winner_event_id is not None:
+        duplicate_state = (
+            "self_winner"
+            if duplicate_winner_event_id == event_id
+            else "winner_elsewhere"
+        )
     duplicate_resolved = (
-        duplicate_checked
-        and duplicate_winner_event_id is not None
-        and duplicate_winner_event_id != event_id
+        duplicate_state == "winner_elsewhere"
         and not ledger_exists
     )
-    duplicate_event_id_prefilter_likely = duplicate_resolved
+    duplicate_event_id_prefilter_likely = duplicate_state == "winner_elsewhere"
 
     diagnosis_code = "missing_everywhere"
     diagnosis_summary = "No submission, redis traces, ledger row, or state row found."
@@ -588,6 +599,7 @@ async def debug_checkin(event_id: str):
         "duplicate_same_day": {
             "checked": duplicate_checked,
             "winner_event_id": duplicate_winner_event_id,
+            "duplicate_state": duplicate_state,
             "duplicate_event_id_prefilter_likely": duplicate_event_id_prefilter_likely,
         },
         "durable_trace_exists": durable_trace_exists,

@@ -93,39 +93,22 @@ Indexes:
 - `GIST(location)` for viewport queries.
 - `BTREE(status, updated_at)` for stale sweeps.
 
-### `signals`
-- `event_id` (PK, string).
-- `pubkey` (string).
-- `place_id` (FK -> places.id).
-- `status` (enum): `success|failed|did_not_try`.
-- `signal_at` (timestamp).
-- `signal_date` (date).
-- `relay_set` (jsonb): relays observed from indexer.
-- `raw_tags` (jsonb).
+### `signals_v2_events` (canonical ledger)
+- Immutable canonical ingestion/confirmation surface for user-visible v2 confirmation.
+- One row per ingested event id (`event_id` PK), including parsed signal fields (`pubkey`, `place_id`, `status`, `created_at`, `day_utc`) and canonical event/history payload fields.
+- `event_id` existence in this table is canonical truth for v2 confirmation.
 
-Constraints:
-- unique (`pubkey`, `place_id`, `signal_date`) for anti-spam daily uniqueness.
-- optional unique (`event_id`) as canonical dedupe.
-
-### `payment_evidence` (optional but recommended)
-- `id` (PK).
-- `signal_event_id` (FK -> signals.event_id).
-- `proof_type` (`none|nwc|preimage|external_ref`).
-- `proof_ref` (text/jsonb).
-- `verified` (bool).
+### `checkin_submissions` (durable trace, not canonical confirmation truth)
+- Durable API submission trace keyed by `event_id`.
+- Used for request durability/idempotency and operator diagnostics.
+- Must not be treated as canonical confirmation by itself.
 
 ## 4.2 Derived entities
 
-### `place_stats_daily`
-- `place_id`, `date`.
-- `signals_total`, `signals_success`, `unique_pubkeys`.
-- `score_components` (jsonb).
-
-### `place_confidence`
-- `place_id`.
-- `confidence_score` (`0..100`).
-- `last_confirmed_at`.
-- `computation_version`.
+### `signals_v2_state` (derived/materialized state)
+- Deterministic reduced state derived from `signals_v2_events`.
+- Used for feed/state reads and summary projections.
+- Rebuildable from the canonical ledger.
 
 ## 4.3 Cache keys (Redis)
 
@@ -133,6 +116,11 @@ Constraints:
 - `place:feed:{place_id}` → recent feed payload (TTL 15–60s).
 - `place:summary:{place_id}` → confidence + metadata (TTL 60–300s).
 - `rl:checkin:{pubkey}:{place_id}` → burst control window.
+- `checkin:pending:{event_id}`, `checkin:meta:{event_id}`, `checkin:probe:{event_id}` → ephemeral handoff/polling only (non-durable, non-canonical).
+
+### Legacy compatibility residue
+- `signals` (legacy table) may still exist for compatibility boundaries.
+- It is not canonical for user-visible v2 confirmation semantics.
 
 ---
 
@@ -140,9 +128,11 @@ Constraints:
 
 ### Write path (decentralized)
 1. Client signs/publishes Nostr signal event.
-2. Client posts `/v1/checkins/confirm` with event id + metadata.
-3. Indexer ingests from relay streams and confirms canonical persistence.
-4. API returns eventual consistency state (`pending|confirmed|rejected`).
+2. Client posts `/v1/checkins/confirm` with the same signed `event_id` + metadata.
+3. API persists `checkin_submissions` as durable trace (not canonical confirmation).
+4. Canonical confirmation exists only when that exact `event_id` is present in `signals_v2_events`.
+5. `signals_v2_state` is materialized from canonical events.
+6. Redis remains ephemeral handoff/polling state and does not define truth.
 
 ### Read path (deterministic)
 1. Client loads places/feed from API only.
@@ -170,8 +160,10 @@ Creates short-lived intent token (anti-replay and rate-limit gate).
 Accepts signed event + intent token + optional payment evidence.
 
 Response includes:
-- `status`: `pending|confirmed|rejected`
+- `status`: `pending|ok|rejected|failed` (route-dependent mapping)
 - `reason_code` for failures.
+
+User-visible canonical confirmation source: `signals_v2_events` ledger presence by `event_id`.
 
 ---
 
@@ -264,6 +256,7 @@ Recommendation:
 ### Tracing + logs
 - Correlate `checkin_intent_id` across API and indexer.
 - Structured logs with `place_id`, `pubkey_hash`, `reason_code`.
+- Operator/debug surfaces may normalize stale Redis pending-like traces once canonical ledger truth exists, to avoid contradictory diagnostics; this is presentation behavior only and does not make Redis authoritative.
 
 ### Alerts
 - `/v1/places` 5xx > 1% for 5 minutes.
@@ -272,30 +265,15 @@ Recommendation:
 
 ---
 
-## 12) Migration plan (incremental, low risk)
+## 12) Migration state (current truth model)
 
-### Phase 0 (1–3 days): reliability patch
-- Enforce canonical `place` tag end-to-end.
-- Cache viewport reads (`/v1/places`) with short TTL.
-- Add fallback source path when primary upstream fails.
+The repo is post-core-migration for v2 truth boundaries:
+- `signals_v2_events` is canonical immutable truth for user-visible confirmation/history.
+- `signals_v2_state` is derived/materialized state from canonical events.
+- `checkin_submissions` is a durable submission trace only.
+- Redis is ephemeral handoff/polling state only.
 
-### Phase 1 (1–2 weeks): index-backed reads
-- Add `/v1/places/{id}` and `/v1/places/{id}/feed`.
-- Shift UI drawer reads from relays to API.
-- Keep relay reads as hidden fallback only.
-
-### Phase 2 (1 week): check-in intent/confirm
-- Implement intent token + confirm endpoint.
-- Persist pending/confirmed lifecycle in DB.
-
-### Phase 3 (1–2 weeks): trust hardening
-- Add payment evidence table and scoring weights.
-- Add anti-spam controls and reviewer reputation inputs.
-
-### Phase 4 (ongoing): growth and optimization
-- Merchant claim flow.
-- Invite loops and quality feedback pathways.
-- Read replica rollout if SLO pressure requires.
+Remaining migration work is normalization and cleanup around these already-implemented boundaries, not truth-model redesign.
 
 ---
 
@@ -305,7 +283,7 @@ Recommendation:
 - **ADR-002:** `place` is canonical Nostr tag for place identity.
 - **ADR-003:** Canonical place IDs are namespaced and source-normalized.
 - **ADR-004:** Redis used for hot path caching and rate limiting.
-- **ADR-005:** Check-in lifecycle is intent → confirm → indexed visibility.
+- **ADR-005:** Check-in lifecycle is intent → durable submission trace → canonical ledger visibility.
 
 ---
 
@@ -314,4 +292,4 @@ Recommendation:
 - Use Primal’s reliability pattern: decentralized publish, centralized indexed reads.
 - Make canonical place identity non-negotiable.
 - Design for failure: stale cache beats empty screen.
-- Move from “relay-dependent UX” to “API-guaranteed UX” while preserving open protocols.
+- Canonical confirmation truth for v2 is `signals_v2_events` by exact `event_id`; derived state and ephemeral traces assist reads/diagnostics but do not override ledger truth.
