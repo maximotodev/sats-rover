@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { dedupeAndSortSignalFeed, normalizePlaceFeedResult, normalizeSignalFeedItem } from "./normalize";
+import {
+  collapsePendingForEventId,
+  dedupeAndSortSignalFeed,
+  normalizePlaceFeedResult,
+  normalizeSignalFeedItem,
+} from "./normalize";
 import { mergeSignalFeed, withOptimisticPending } from "./selectors";
 import type { GlobalFeedResult, PlaceFeedResult, SignalFeedItemUI, SignalFeedSource, SignalStatus } from "./types";
 import { logEvent } from "@/lib/observability";
@@ -187,9 +192,25 @@ export function useSignalFeed(args: UseSignalFeedArgs) {
     setItems((prev) => withOptimisticPending(prev, item));
   }, []);
 
+  const markConfirmed = useCallback((eventId: string) => {
+    if (!eventId) return;
+    setItems((prev) =>
+      dedupeAndSortSignalFeed(collapsePendingForEventId(prev, eventId)),
+    );
+  }, []);
+
   const value = useMemo(
-    () => ({ items, loading, error, confidenceScore, places, refresh, addOptimistic }),
-    [items, loading, error, confidenceScore, places, refresh, addOptimistic],
+    () => ({
+      items,
+      loading,
+      error,
+      confidenceScore,
+      places,
+      refresh,
+      addOptimistic,
+      markConfirmed,
+    }),
+    [items, loading, error, confidenceScore, places, refresh, addOptimistic, markConfirmed],
   );
 
   return value;
