@@ -179,7 +179,8 @@ export function useNostr() {
       event.tags = buildCheckinSignalTags(merchantId, paymentStatus);
 
       try {
-        const provisionalEventId = typeof event.id === "string" ? event.id : null;
+        const provisionalEventId =
+          typeof event.id === "string" ? event.id : null;
         console.info("checkin_publish_start", {
           provisional_event_id: provisionalEventId,
           pubkey: session.pubkey || null,
@@ -261,7 +262,7 @@ export function useNostr() {
       event.tags = [
         ["place", merchantId],
         ["role", "owner"],
-        ["v", PROTOCOL_VERSION],
+        ["v", "2"],
       ];
 
       return (await event.publish()).size > 0;
