@@ -90,6 +90,21 @@ export function dedupeAndSortSignalFeed(items: SignalFeedItemUI[]): SignalFeedIt
   return Array.from(byId.values()).sort((a, b) => b.createdAtMs - a.createdAtMs);
 }
 
+export function collapsePendingForEventId(
+  items: SignalFeedItemUI[],
+  eventId: string,
+): SignalFeedItemUI[] {
+  if (!eventId) return items;
+  return items.map((item) => {
+    if (item.id !== eventId) return item;
+    return {
+      ...item,
+      pending: false,
+      source: item.source === "optimistic" ? "indexer" : item.source,
+    };
+  });
+}
+
 export function normalizePlaceFeedResult(
   payload: unknown,
   placeId: string,

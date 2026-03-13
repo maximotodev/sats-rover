@@ -81,3 +81,63 @@ test("normalize + dedupe sorts newest first and prefers non-pending", async () =
   assert.equal(result[1].pending, false);
   assert.equal(result[1].content, "newer");
 });
+
+test("collapsePendingForEventId clears pending only for exact event id", async () => {
+  const { collapsePendingForEventId } = await loadTsModule(
+    "apps/web/src/domain/signals/normalize.ts",
+  );
+
+  const items = [
+    {
+      id: "evt-1",
+      placeId: "p1",
+      pubkey: "a".repeat(64),
+      status: "success",
+      content: "optimistic",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      createdAtMs: Date.parse("2026-01-01T00:00:00.000Z"),
+      source: "optimistic",
+      pending: true,
+    },
+    {
+      id: "evt-2",
+      placeId: "p1",
+      pubkey: "b".repeat(64),
+      status: "failed",
+      content: "still pending",
+      createdAt: "2026-01-01T00:01:00.000Z",
+      createdAtMs: Date.parse("2026-01-01T00:01:00.000Z"),
+      source: "optimistic",
+      pending: true,
+    },
+  ];
+
+  const result = collapsePendingForEventId(items, "evt-1");
+  assert.equal(result.length, 2);
+  assert.equal(result[0].id, "evt-1");
+  assert.equal(result[0].pending, false);
+  assert.equal(result[0].source, "indexer");
+  assert.equal(result[1].id, "evt-2");
+  assert.equal(result[1].pending, true);
+});
+
+test("collapsePendingForEventId does nothing when event id does not match", async () => {
+  const { collapsePendingForEventId } = await loadTsModule(
+    "apps/web/src/domain/signals/normalize.ts",
+  );
+  const item = {
+    id: "evt-local",
+    placeId: "p1",
+    pubkey: "a".repeat(64),
+    status: "success",
+    content: "optimistic",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    createdAtMs: Date.parse("2026-01-01T00:00:00.000Z"),
+    source: "optimistic",
+    pending: true,
+  };
+  const result = collapsePendingForEventId([item], "evt-canonical");
+  assert.equal(result[0].id, "evt-local");
+  assert.equal(result[0].pending, true);
+  assert.equal(result[0].source, "optimistic");
+});

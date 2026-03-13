@@ -470,6 +470,10 @@ export default function MerchantDrawer({
         if (status === "ok" || status === "failed" || status === "not_found") {
           setCheckinStatus(status);
           setCheckinReason(reason);
+          if (status === "ok") {
+            placeFeed.markConfirmed(checkinId);
+            void placeFeed.refresh();
+          }
           return;
         }
 
@@ -681,6 +685,8 @@ export default function MerchantDrawer({
       if (confirmDecision.next === "ok") {
         setCheckinStatus("ok");
         setCheckinReason(confirmDecision.reasonCode);
+        placeFeed.markConfirmed(eventId);
+        void placeFeed.refresh();
         setIsPublishing(false);
         return;
       }
