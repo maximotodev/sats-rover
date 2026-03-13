@@ -467,7 +467,10 @@ class CheckinsIdempotencyTests(unittest.IsolatedAsyncioTestCase):
         db = AsyncMock()
         db.execute = AsyncMock(side_effect=_db_execute)
 
-        with patch("app.services.signals_service.redis_client.get", new=AsyncMock(side_effect=AssertionError("redis not expected"))):
+        with patch("app.services.signals_service.redis_client.get", new=AsyncMock(side_effect=AssertionError("redis not expected"))), patch(
+            "app.services.signals_service.redis_client.delete",
+            new=AsyncMock(return_value=0),
+        ):
             status = await get_checkin_status(db=db, checkin_id=checkin_id)
 
         self.assertEqual(status.status, "ok")
@@ -494,7 +497,10 @@ class CheckinsIdempotencyTests(unittest.IsolatedAsyncioTestCase):
         db = AsyncMock()
         db.execute = AsyncMock(side_effect=_db_execute)
 
-        with patch("app.services.signals_service.redis_client.get", new=AsyncMock(side_effect=AssertionError("redis not expected"))):
+        with patch("app.services.signals_service.redis_client.get", new=AsyncMock(side_effect=AssertionError("redis not expected"))), patch(
+            "app.services.signals_service.redis_client.delete",
+            new=AsyncMock(return_value=0),
+        ):
             status = await get_checkin_status(db=db, checkin_id=checkin_id)
 
         self.assertEqual(status.status, "ok")
@@ -516,15 +522,71 @@ class CheckinsIdempotencyTests(unittest.IsolatedAsyncioTestCase):
         db = AsyncMock()
         db.execute = AsyncMock(side_effect=_db_execute)
 
-        with patch("app.services.signals_service.redis_client.get", new=AsyncMock(side_effect=AssertionError("redis not expected"))):
+        with patch("app.services.signals_service.redis_client.get", new=AsyncMock(side_effect=AssertionError("redis not expected"))), patch(
+            "app.services.signals_service.redis_client.delete",
+            new=AsyncMock(return_value=0),
+        ):
             status = await get_checkin_status(db=db, checkin_id=checkin_id)
 
         self.assertEqual(status.status, "ok")
         self.assertEqual(status.reason_code, "confirmed")
         self.assertEqual(status.event_id, checkin_id)
 
-    async def test_status_v2_missing_relation_does_not_confirm_from_legacy(self):
+    async def test_status_ledger_hit_cleans_stale_redis_handoff_keys(self):
         checkin_id = "d" * 64
+
+        async def _db_execute(stmt, params):
+            sql = str(stmt)
+            if "FROM signals_v2_events" in sql and "WHERE event_id" in sql:
+                return _MappingsResult({"one": 1})
+            if "UPDATE checkin_submissions" in sql:
+                return _MappingsResult(None)
+            return _MappingsResult(None)
+
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=_db_execute)
+        delete_mock = AsyncMock(return_value=3)
+
+        with patch(
+            "app.services.signals_service.redis_client.delete",
+            new=delete_mock,
+        ):
+            status = await get_checkin_status(db=db, checkin_id=checkin_id)
+
+        self.assertEqual(status.status, "ok")
+        self.assertEqual(status.reason_code, "confirmed")
+        delete_mock.assert_awaited_once_with(
+            f"checkin:pending:{checkin_id}",
+            f"checkin:meta:{checkin_id}",
+            f"checkin:probe:{checkin_id}",
+        )
+
+    async def test_status_ledger_hit_redis_cleanup_failure_does_not_block_confirmation(self):
+        checkin_id = "e" * 64
+
+        async def _db_execute(stmt, params):
+            sql = str(stmt)
+            if "FROM signals_v2_events" in sql and "WHERE event_id" in sql:
+                return _MappingsResult({"one": 1})
+            if "UPDATE checkin_submissions" in sql:
+                return _MappingsResult(None)
+            return _MappingsResult(None)
+
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=_db_execute)
+
+        with patch(
+            "app.services.signals_service.redis_client.delete",
+            new=AsyncMock(side_effect=RuntimeError("redis down")),
+        ), patch("app.services.signals_service.logger.warning", new=Mock()) as warning_log:
+            status = await get_checkin_status(db=db, checkin_id=checkin_id)
+
+        self.assertEqual(status.status, "ok")
+        self.assertEqual(status.reason_code, "confirmed")
+        warning_log.assert_called_once()
+
+    async def test_status_v2_missing_relation_does_not_confirm_from_legacy(self):
+        checkin_id = "f" * 64
         exc = self._dbapi_error(
             'relation "signals_v2_events" does not exist',
             sqlstate="42P01",
@@ -547,7 +609,7 @@ class CheckinsIdempotencyTests(unittest.IsolatedAsyncioTestCase):
             await get_checkin_status(db=db, checkin_id=checkin_id)
 
     async def test_status_non_eligible_db_error_raises(self):
-        checkin_id = "e" * 64
+        checkin_id = "1" * 64
         exc = self._dbapi_error(
             'relation "signals_v2_events" does not exist',
             sqlstate="23505",
@@ -655,10 +717,11 @@ class CheckinsIdempotencyTests(unittest.IsolatedAsyncioTestCase):
         db = AsyncMock()
         db.execute = AsyncMock(side_effect=_db_execute)
 
+        delete_mock = AsyncMock(return_value=3)
         with patch("app.services.signals_service.redis_client.getdel", new=AsyncMock(return_value='{"place_id":"btcmap:abc"}')), patch(
             "app.services.signals_service.redis_client.setex",
             new=AsyncMock(return_value=True),
-        ):
+        ), patch("app.services.signals_service.redis_client.delete", new=delete_mock):
             out = await confirm_checkin(db=db, payload=payload, intent_token="sr_ci_demo")
 
         self.assertTrue(calls["inserted"])
@@ -666,6 +729,50 @@ class CheckinsIdempotencyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(out.status, "ok")
         self.assertEqual(out.reason_code, "confirmed")
         self.assertEqual(out.event_id, payload.event_id)
+        delete_mock.assert_awaited_once_with(
+            f"checkin:pending:{payload.event_id}",
+            f"checkin:meta:{payload.event_id}",
+            f"checkin:probe:{payload.event_id}",
+        )
+
+    async def test_confirm_ledger_hit_redis_cleanup_failure_does_not_block_ok(self):
+        payload = CheckinConfirmIn(
+            event_id="f" * 64,
+            place_id="btcmap:abc",
+            pubkey="a" * 64,
+            payment_evidence=None,
+        )
+
+        async def _db_execute(stmt, params):
+            sql = str(stmt)
+            if "FROM signals" in sql and "pubkey =" in sql:
+                return _MappingsResult(None)
+            if "FROM signals_v2_events" in sql and "WHERE event_id" in sql:
+                return _MappingsResult({"one": 1})
+            if "INSERT INTO checkin_submissions" in sql:
+                return _MappingsResult(None)
+            if "SELECT 1 AS one" in sql and "FROM checkin_submissions" in sql:
+                return _MappingsResult({"one": 1})
+            if "UPDATE checkin_submissions" in sql:
+                return _MappingsResult(None)
+            return _MappingsResult(None)
+
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=_db_execute)
+        warning_log = Mock()
+
+        with patch("app.services.signals_service.redis_client.getdel", new=AsyncMock(return_value='{"place_id":"btcmap:abc"}')), patch(
+            "app.services.signals_service.redis_client.setex",
+            new=AsyncMock(return_value=True),
+        ), patch(
+            "app.services.signals_service.redis_client.delete",
+            new=AsyncMock(side_effect=RuntimeError("redis down")),
+        ), patch("app.services.signals_service.logger.warning", new=warning_log):
+            out = await confirm_checkin(db=db, payload=payload, intent_token="sr_ci_demo")
+
+        self.assertEqual(out.status, "ok")
+        self.assertEqual(out.reason_code, "confirmed")
+        warning_log.assert_called_once()
 
     async def test_confirm_rejects_when_submission_not_persisted(self):
         payload = CheckinConfirmIn(

@@ -169,6 +169,34 @@ def _log_confirmed_mutation(
     )
 
 
+async def _cleanup_checkin_redis_traces(
+    *,
+    event_id: str,
+    mutation_source: str,
+) -> None:
+    try:
+        await redis_client.delete(
+            f"checkin:pending:{event_id}",
+            f"checkin:meta:{event_id}",
+            f"checkin:probe:{event_id}",
+        )
+        logger.info(
+            "checkin_redis_cleanup_ok",
+            extra={
+                "event_id": event_id,
+                "mutation_source": mutation_source,
+            },
+        )
+    except Exception:
+        logger.warning(
+            "checkin_redis_cleanup_failed",
+            extra={
+                "event_id": event_id,
+                "mutation_source": mutation_source,
+            },
+        )
+
+
 def _compact_json_or_none(value: object, *, max_len: int) -> tuple[str | None, bool]:
     if value is None:
         return None, False
@@ -814,6 +842,10 @@ async def confirm_checkin(
                 "checkin_intent_id": intent_token,
             },
         )
+        await _cleanup_checkin_redis_traces(
+            event_id=payload.event_id,
+            mutation_source="confirm_checkin_v2_ledger_hit",
+        )
         return CheckinConfirmOut(
             status="ok",
             reason_code="confirmed",
@@ -909,6 +941,10 @@ async def get_checkin_status(
                 """
             ),
             {"event_id": checkin_id},
+        )
+        await _cleanup_checkin_redis_traces(
+            event_id=checkin_id,
+            mutation_source="get_checkin_status_v2_ledger_hit",
         )
         return CheckinStatusOut(status="ok", reason_code="confirmed", event_id=checkin_id)
 
