@@ -58,6 +58,13 @@ type CheckinLifecycleState =
   | "failed"
   | "not_found";
 type ComposerStep = "broadcast" | "pay";
+type DrawerMode =
+  | "idle"
+  | "composing"
+  | "publishing"
+  | "awaiting_confirmation"
+  | "confirmed"
+  | "error";
 
 type FailedBroadcastMap = Record<string, string>;
 
@@ -290,6 +297,7 @@ export default function MerchantDrawer({
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [visibleCount, setVisibleCount] = useState(30);
   const [copiedHint, setCopiedHint] = useState<string | null>(null);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
 
   const pollRunIdRef = useRef(0);
   const copiedHintTimerRef = useRef<number | null>(null);
@@ -319,6 +327,7 @@ export default function MerchantDrawer({
     setExpandedId(null);
     setVisibleCount(30);
     setCopiedHint(null);
+    setAdvancedOpen(false);
   }, [placeId]);
 
   useEffect(() => {
@@ -471,6 +480,8 @@ export default function MerchantDrawer({
           setCheckinStatus(status);
           setCheckinReason(reason);
           if (status === "ok") {
+            setComposerOpen(false);
+            setComposerStep("broadcast");
             placeFeed.markConfirmed(checkinId);
             void placeFeed.refresh();
           }
@@ -494,7 +505,10 @@ export default function MerchantDrawer({
     }
   };
 
-  const handleSubmitReport = async () => {
+  const handleSubmitReport = async (overrides?: {
+    paymentStatus?: SignalStatus;
+    comment?: string;
+  }) => {
     if (!merchant) return;
     const actorPubkey = session.pubkey;
     if (!actorPubkey) {
@@ -561,9 +575,12 @@ export default function MerchantDrawer({
       intentToken = "";
     }
 
+    const submissionStatus = overrides?.paymentStatus ?? paymentStatus;
+    const submissionComment = overrides?.comment ?? comment;
+
     setCheckinStatus("publishing");
     const publishResult = await transmitSignalFlow.run(async () =>
-      publishSignal(merchant.id, paymentStatus, comment),
+      publishSignal(merchant.id, submissionStatus, submissionComment),
     );
 
     if (!publishResult.ok || !publishResult.eventId) {
@@ -573,8 +590,8 @@ export default function MerchantDrawer({
           id: failedId,
           placeId: merchant.id,
           pubkey: actorPubkey,
-          status: paymentStatus,
-          content: comment,
+          status: submissionStatus,
+          content: submissionComment,
         }),
       );
       setFailedBroadcastMap((prev) => ({
@@ -598,8 +615,8 @@ export default function MerchantDrawer({
         id: eventId,
         placeId: merchant.id,
         pubkey: actorPubkey,
-        status: paymentStatus,
-        content: comment,
+        status: submissionStatus,
+        content: submissionComment,
       }),
     );
 
@@ -685,6 +702,8 @@ export default function MerchantDrawer({
       if (confirmDecision.next === "ok") {
         setCheckinStatus("ok");
         setCheckinReason(confirmDecision.reasonCode);
+        setComposerOpen(false);
+        setComposerStep("broadcast");
         placeFeed.markConfirmed(eventId);
         void placeFeed.refresh();
         setIsPublishing(false);
@@ -703,8 +722,6 @@ export default function MerchantDrawer({
     await pollCheckinStatus(eventId, actorPubkey, merchant.id);
 
     setIsPublishing(false);
-    setComposerStep("pay");
-    setComposerOpen(true);
 
     setTimeout(() => {
       void placeFeed.refresh();
@@ -721,6 +738,30 @@ export default function MerchantDrawer({
     (checkinStatus === "failed" ||
       checkinStatus === "not_found" ||
       Boolean(publishError));
+
+  const drawerMode: DrawerMode = useMemo(() => {
+    if (checkinStatus === "ok") return "confirmed";
+    if (
+      checkinStatus === "failed" ||
+      checkinStatus === "not_found" ||
+      Boolean(publishError)
+    ) {
+      return "error";
+    }
+    if (isPublishing || checkinStatus === "intent_created" || checkinStatus === "publishing") {
+      return "publishing";
+    }
+    if (checkinStatus === "confirming" || checkinStatus === "pending") {
+      return "awaiting_confirmation";
+    }
+    if (composerOpen) return "composing";
+    return "idle";
+  }, [checkinStatus, composerOpen, isPublishing, publishError]);
+
+  const showTopWorkflowAction =
+    drawerMode !== "composing" &&
+    drawerMode !== "publishing" &&
+    drawerMode !== "awaiting_confirmation";
 
   return (
     <div
@@ -793,25 +834,17 @@ export default function MerchantDrawer({
                 </div>
               </div>
 
-              <div className="mt-4 grid grid-cols-2 gap-2">
-                <button
-                  onClick={openComposer}
-                  className="col-span-2 inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-[#00FF41]/45 bg-[#00FF41]/90 px-3 py-2 text-[13px] font-semibold text-black shadow-[0_0_18px_rgba(0,255,65,0.35)] transition hover:bg-[#67ff92]"
-                >
-                  <Zap className="h-4 w-4" /> Check in
-                </button>
-                <button
-                  onClick={() => copyValue("event id", latestEventId)}
-                  className="inline-flex min-h-10.5 items-center justify-center gap-1 rounded-lg border border-white/15 bg-black/35 px-3 py-2 text-[11px] text-gray-300 hover:bg-white/5"
-                >
-                  <Copy className="h-3.5 w-3.5" /> Copy event
-                </button>
-                <button
-                  onClick={() => copyValue("place id", merchant.id)}
-                  className="inline-flex min-h-10.5 items-center justify-center gap-1 rounded-lg border border-white/15 bg-black/35 px-3 py-2 text-[11px] text-gray-300 hover:bg-white/5"
-                >
-                  <Copy className="h-3.5 w-3.5" /> Copy place
-                </button>
+              {showTopWorkflowAction && (
+                <div className="mt-4 grid grid-cols-2 gap-2">
+                  <button
+                    onClick={openComposer}
+                    className="col-span-2 inline-flex min-h-10.5 items-center justify-center gap-2 rounded-lg border border-[#F7931A]/35 bg-[#F7931A]/10 px-3 py-2 text-[12px] font-semibold text-[#F7B267] hover:bg-[#F7931A]/20"
+                  >
+                    <Signal className="h-4 w-4" /> Publish signal
+                  </button>
+                </div>
+              )}
+              <div className="mt-2 grid grid-cols-2 gap-2">
                 <button
                   onClick={handleShare}
                   className="inline-flex min-h-10.5 items-center justify-center gap-1 rounded-lg border border-white/15 bg-black/35 px-3 py-2 text-[11px] text-gray-300 hover:bg-white/5"
@@ -867,25 +900,54 @@ export default function MerchantDrawer({
                 </span>
               </div>
 
-              <div className="mt-3 rounded-lg border border-white/10 bg-black/40 px-3 py-2 font-mono text-[11px] text-gray-400">
-                <div className="flex items-center justify-between gap-2">
-                  <span>place_id</span>
-                  <button
-                    onClick={() => copyValue("place_id", merchant.id)}
-                    className="inline-flex items-center gap-1 text-gray-300 hover:text-white"
-                  >
-                    <Copy className="h-3 w-3" /> {shortHex(merchant.id, 12, 6)}
-                  </button>
-                </div>
-                {activeCheckinId && (
-                  <div className="mt-1 flex items-center justify-between gap-2">
-                    <span>event_id</span>
-                    <button
-                      onClick={() => copyValue("event_id", activeCheckinId)}
-                      className="inline-flex items-center gap-1 text-gray-300 hover:text-white"
-                    >
-                      <Copy className="h-3 w-3" /> {shortHex(activeCheckinId)}
-                    </button>
+              <div className="mt-3 rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-[11px]">
+                <button
+                  onClick={() => setAdvancedOpen((prev) => !prev)}
+                  className="flex w-full items-center justify-between text-gray-300 hover:text-white"
+                >
+                  <span className="font-semibold uppercase tracking-wide">Advanced</span>
+                  {advancedOpen ? (
+                    <ChevronUp className="h-3.5 w-3.5" />
+                  ) : (
+                    <ChevronDown className="h-3.5 w-3.5" />
+                  )}
+                </button>
+                {advancedOpen && (
+                  <div className="mt-2 space-y-2 border-t border-white/10 pt-2 font-mono text-gray-400">
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        onClick={() => copyValue("event id", latestEventId)}
+                        className="inline-flex min-h-9 items-center justify-center gap-1 rounded-lg border border-white/15 bg-black/35 px-2 py-1.5 text-[10px] text-gray-300 hover:bg-white/5"
+                      >
+                        <Copy className="h-3.5 w-3.5" /> Copy event
+                      </button>
+                      <button
+                        onClick={() => copyValue("place id", merchant.id)}
+                        className="inline-flex min-h-9 items-center justify-center gap-1 rounded-lg border border-white/15 bg-black/35 px-2 py-1.5 text-[10px] text-gray-300 hover:bg-white/5"
+                      >
+                        <Copy className="h-3.5 w-3.5" /> Copy place
+                      </button>
+                    </div>
+                    <div className="flex items-center justify-between gap-2">
+                      <span>place_id</span>
+                      <button
+                        onClick={() => copyValue("place_id", merchant.id)}
+                        className="inline-flex items-center gap-1 text-gray-300 hover:text-white"
+                      >
+                        <Copy className="h-3 w-3" /> {shortHex(merchant.id, 12, 6)}
+                      </button>
+                    </div>
+                    {activeCheckinId && (
+                      <div className="flex items-center justify-between gap-2">
+                        <span>event_id</span>
+                        <button
+                          onClick={() => copyValue("event_id", activeCheckinId)}
+                          className="inline-flex items-center gap-1 text-gray-300 hover:text-white"
+                        >
+                          <Copy className="h-3 w-3" /> {shortHex(activeCheckinId)}
+                        </button>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -903,16 +965,14 @@ export default function MerchantDrawer({
               </div>
             )}
 
-            {(checkinStatus !== "idle" || publishError) && (
+            {((checkinStatus !== "idle" && checkinStatus !== "ok") ||
+              publishError) && (
               <div
                 className={cn(
                   "mb-4 rounded-xl border px-3 py-3 text-xs shadow-[inset_0_0_18px_rgba(255,255,255,0.04)]",
-                  checkinStatus === "ok"
-                    ? "border-[#00FF41]/35 bg-[#00FF41]/10"
-                    : checkinStatus === "failed" ||
-                        checkinStatus === "not_found"
-                      ? "border-red-500/35 bg-red-950/20"
-                      : "border-[#F7931A]/35 bg-[#F7931A]/10",
+                  checkinStatus === "failed" || checkinStatus === "not_found"
+                    ? "border-red-500/35 bg-red-950/20"
+                    : "border-[#F7931A]/35 bg-[#F7931A]/10",
                 )}
               >
                 {(checkinStatus === "intent_created" ||
@@ -925,11 +985,6 @@ export default function MerchantDrawer({
                     {checkinStatus === "publishing" && "Publishing signal…"}
                     {checkinStatus === "confirming" && "Confirming check-in…"}
                     {checkinStatus === "pending" && "Indexing… pending"}
-                  </div>
-                )}
-                {checkinStatus === "ok" && (
-                  <div className="inline-flex items-center gap-2 text-[#8cffb0]">
-                    <CheckCircle2 className="h-4 w-4" /> Confirmed
                   </div>
                 )}
                 {(checkinStatus === "failed" ||
@@ -949,7 +1004,9 @@ export default function MerchantDrawer({
                 )}
                 {canRetryCheckin && (
                   <button
-                    onClick={handleSubmitReport}
+                    onClick={() => {
+                      void handleSubmitReport();
+                    }}
                     disabled={isPublishing || checkinStatus === "pending"}
                     className="mt-2 inline-flex min-h-9.5 items-center gap-2 rounded-lg border border-red-400/40 bg-red-500/10 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-red-200 hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-60"
                   >
@@ -959,11 +1016,23 @@ export default function MerchantDrawer({
               </div>
             )}
 
+            {drawerMode === "confirmed" && activeCheckinId && (
+              <div className="mb-4 rounded-lg border border-[#00FF41]/30 bg-[#00FF41]/8 px-3 py-2 text-[11px] text-[#9affbc]">
+                <div className="inline-flex items-center gap-1.5">
+                  <CheckCircle2 className="h-3.5 w-3.5" />
+                  Check-in confirmed in canonical timeline
+                </div>
+                <div className="mt-1 font-mono text-[10px] text-[#9affbc]/90">
+                  event {shortHex(activeCheckinId)}
+                </div>
+              </div>
+            )}
+
             {composerOpen && (
               <section className="mb-4 rounded-xl border border-[#F7931A]/35 bg-black/35 p-4 shadow-[inset_0_0_18px_rgba(247,147,26,0.1)]">
                 <div className="mb-3 flex items-center justify-between">
                   <h3 className="text-xs font-semibold uppercase tracking-widest text-[#F7B267]">
-                    Check-in Composer
+                    Publish signal
                   </h3>
                   <button
                     onClick={() => setComposerOpen(false)}
@@ -1037,7 +1106,9 @@ export default function MerchantDrawer({
                         />
 
                         <button
-                          onClick={handleSubmitReport}
+                          onClick={() => {
+                            void handleSubmitReport();
+                          }}
                           disabled={isPublishing || checkinStatus === "pending"}
                           className="inline-flex w-full min-h-11.5 items-center justify-center gap-2 rounded-xl border border-[#00FF41]/40 bg-[#00FF41] px-3 py-2 text-sm font-semibold uppercase tracking-[0.16em] text-black shadow-[0_0_22px_rgba(0,255,65,0.35)] transition hover:bg-[#6cff96] disabled:cursor-not-allowed disabled:opacity-60"
                         >
