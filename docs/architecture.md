@@ -1,6 +1,6 @@
 # SatsRover Architecture (Primal-Inspired Reliability Design)
 
-This document defines a **production-oriented system design** for SatsRover, optimized for reliability, low-latency UX, and anti-fragile Nostr + Lightning flows.
+This document defines the current **production-oriented system design** for SatsRover, including the stable v2 check-in truth boundaries, optimized for reliability, low-latency UX, and anti-fragile Nostr + Lightning flows.
 
 > Guiding idea copied from Primal’s model: **clients publish to a decentralized network, but reads come from a deterministic indexed backend**.
 
@@ -142,7 +142,7 @@ Indexes:
 
 ---
 
-## 6) API contract (v1)
+## 6) Current API contract (/v1 routes)
 
 ### `GET /v1/places?bbox={minLon,minLat,maxLon,maxLat}&limit=600`
 Returns canonical places for viewport.
@@ -191,7 +191,7 @@ Keep source crosswalk in `source_refs`.
 
 ---
 
-## 8) Trust and scoring model (v1)
+## 8) Trust and scoring model
 
 Confidence score (0–100) = weighted sum of:
 - `recency_weight` (recent activity counts more).
@@ -212,7 +212,7 @@ Store score components to make moderation and tuning explainable.
 
 ### Failure: relay lag/partial propagation
 - Mitigation: multi-relay ingestion + delayed reconciliation pass.
-- Outcome: signals appear with `pending` state before full confirmation.
+- Outcome: signals may appear with `pending` state before canonical ledger confirmation.
 
 ### Failure: cache outage (Redis)
 - Mitigation: direct Postgres fallback, reduced QPS via stricter limits.

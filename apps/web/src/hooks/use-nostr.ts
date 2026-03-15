@@ -20,7 +20,9 @@ import {
 import { buildCheckinSignalTags } from "@/flows/signal-tags";
 
 /**
- * PROTOCOL v1 CONSTANTS
+ * Existing runtime kinds used by the current v2 check-in flow.
+ * The kind values stay as-is; v2 here refers to confirmation/truth boundaries,
+ * not a renumbering of Nostr event kinds.
  */
 const KIND_SIGNAL = 30331;
 const KIND_CLAIM = 30333;
@@ -167,9 +169,10 @@ export function useNostr() {
   }, [session.type, session.pubkey, session.user, session.profile]);
 
   /**
-   * PROTOCOL v1: SIGNAL PUBLISHING (Kind 30331)
-   * We now publish a clean machine-readable event.
-   * Logic for Kind 1 cross-posting should be handled by the UI or an optional param.
+   * Canonical v2 check-in publish path (Kind 30331).
+   * This signs and publishes the machine-readable signal event, but relay publish
+   * alone is not canonical confirmation; exact `event_id` correlation and backend/indexer
+   * confirmation remain the truth boundary.
    */
   const publishSignal = useCallback(
     async (
@@ -273,8 +276,8 @@ export function useNostr() {
   );
 
   /**
-   * PROTOCOL v1: MERCHANT CLAIM (Kind 30333)
-   * Cryptographic assertion of ownership.
+   * Merchant claim publish path (existing Kind 30333 runtime behavior).
+   * This comment is intentionally descriptive only; the runtime claim flow is unchanged.
    */
   const publishClaim = useCallback(
     async (merchantId: string) => {
