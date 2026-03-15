@@ -54,6 +54,46 @@ type CacheEntry = {
 };
 
 type LocationPermission = "idle" | "granted" | "denied" | "dismissed";
+type DiscoveryFilterKey =
+  | "claimed"
+  | "recently_active"
+  | "higher_confidence"
+  | "repeated_success";
+
+type DiscoveryFilters = Record<DiscoveryFilterKey, boolean>;
+
+const DEFAULT_DISCOVERY_FILTERS: DiscoveryFilters = {
+  claimed: false,
+  recently_active: false,
+  higher_confidence: false,
+  repeated_success: false,
+};
+
+function merchantMatchesDiscoveryFilters(
+  merchant: Merchant,
+  filters: DiscoveryFilters,
+): boolean {
+  if (filters.claimed && merchant.claim?.claimed !== true) {
+    return false;
+  }
+  if (
+    filters.recently_active &&
+    merchant.profile?.recentlyActive !== true &&
+    merchant.profile?.activeThisWeek !== true
+  ) {
+    return false;
+  }
+  if (filters.higher_confidence && merchant.profile?.higherConfidence !== true) {
+    return false;
+  }
+  if (
+    filters.repeated_success &&
+    merchant.profile?.repeatedSuccessSignals !== true
+  ) {
+    return false;
+  }
+  return true;
+}
 
 function normalizeSource(source: unknown): MerchantSource {
   return source === "sr" || source === "osm" || source === "btcmap"
@@ -307,6 +347,7 @@ export default function MapView({
   const lastDataSigRef = useRef<string>("");
   const merchantsByIdRef = useRef<Map<string, Merchant>>(new Map());
   const mapMerchantsRef = useRef<Merchant[]>([]);
+  const filteredMapMerchantsRef = useRef<Merchant[]>([]);
   const userLocationRef = useRef<{ lat: number; lon: number } | null>(null);
   const selectedMerchantRef = useRef<Merchant | null>(null);
   const geolocWatchIdRef = useRef<number | null>(null);
@@ -318,6 +359,9 @@ export default function MapView({
   const [hoverTooltip, setHoverTooltip] = useState<HoverTooltip | null>(null);
   const [isSearchingArea, setIsSearchingArea] = useState(false);
   const [mapMerchants, setMapMerchants] = useState<Merchant[]>([]);
+  const [discoveryFilters, setDiscoveryFilters] = useState<DiscoveryFilters>(
+    DEFAULT_DISCOVERY_FILTERS,
+  );
 
   const [locationPermission, setLocationPermission] =
     useState<LocationPermission>("idle");
@@ -327,6 +371,11 @@ export default function MapView({
   } | null>(null);
   const [followMe, setFollowMe] = useState(false);
 
+  const hasActiveFilters = useMemo(
+    () => Object.values(discoveryFilters).some(Boolean),
+    [discoveryFilters],
+  );
+
   useEffect(() => {
     onInteractRef.current = onInteract;
   }, [onInteract]);
@@ -335,13 +384,12 @@ export default function MapView({
     onBboxChangeRef.current = onBboxChange;
   }, [onBboxChange]);
 
-  const applyMerchantDataToMap = (
+  const renderMerchantDataToMap = (
     map: maplibregl.Map,
     merchants: Merchant[],
   ): void => {
     merchantsByIdRef.current = new Map(merchants.map((m) => [m.id, m]));
     mapMerchantsRef.current = merchants;
-    setMapMerchants(merchants);
 
     const dataSig = makeDataSig(merchants);
     if (lastDataSigRef.current === dataSig) return;
@@ -354,6 +402,33 @@ export default function MapView({
     src.setData(merchantsToFC(merchants));
     lastDataSigRef.current = dataSig;
   };
+
+  const ingestMerchantData = (merchants: Merchant[]): void => {
+    setMapMerchants(merchants);
+  };
+
+  const filteredMapMerchants = useMemo(
+    () =>
+      mapMerchants.filter((merchant) =>
+        merchantMatchesDiscoveryFilters(merchant, discoveryFilters),
+      ),
+    [mapMerchants, discoveryFilters],
+  );
+
+  const toggleDiscoveryFilter = (key: DiscoveryFilterKey) => {
+    setDiscoveryFilters((prev) => ({
+      ...prev,
+      [key]: !prev[key],
+    }));
+  };
+
+  const resetDiscoveryFilters = () => {
+    setDiscoveryFilters(DEFAULT_DISCOVERY_FILTERS);
+  };
+
+  useEffect(() => {
+    filteredMapMerchantsRef.current = filteredMapMerchants;
+  }, [filteredMapMerchants]);
 
   const emitBboxIfChanged = (bbox: string): void => {
     if (bbox === lastBboxRef.current) return;
@@ -377,7 +452,13 @@ export default function MapView({
     const now = Date.now();
     const cached = cacheRef.current.get(cacheKey);
     if (cached && cached.expiresAt > now) {
-      applyMerchantDataToMap(map, cached.merchants);
+      ingestMerchantData(cached.merchants);
+      renderMerchantDataToMap(
+        map,
+        cached.merchants.filter((merchant) =>
+          merchantMatchesDiscoveryFilters(merchant, discoveryFilters),
+        ),
+      );
       setIsSearchingArea(false);
       return;
     }
@@ -428,7 +509,13 @@ export default function MapView({
       if (map.isStyleLoaded()) {
         ensureMapSourcesAndLayers(map);
       }
-      applyMerchantDataToMap(map, merchantsRaw);
+      ingestMerchantData(merchantsRaw);
+      renderMerchantDataToMap(
+        map,
+        merchantsRaw.filter((merchant) =>
+          merchantMatchesDiscoveryFilters(merchant, discoveryFilters),
+        ),
+      );
     } catch (error) {
       if (!(error instanceof Error) || error.name !== "AbortError") {
         console.error("fetchMerchantsForCurrentView failed", { reason, error });
@@ -544,8 +631,8 @@ export default function MapView({
       if (userSrc) {
         userSrc.setData(userLocationFC(userLocationRef.current));
       }
-      if (mapMerchantsRef.current.length > 0) {
-        applyMerchantDataToMap(map, mapMerchantsRef.current);
+      if (mapMerchantsRef.current.length > 0 || filteredMapMerchantsRef.current.length > 0) {
+        renderMerchantDataToMap(map, filteredMapMerchantsRef.current);
       }
       const selectedId = selectedMerchantRef.current?.id ?? "";
       if (map.getLayer(LAYER_SELECTED)) {
@@ -709,6 +796,12 @@ export default function MapView({
   }, [selectedMerchant]);
 
   useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !map.isStyleLoaded()) return;
+    renderMerchantDataToMap(map, filteredMapMerchants);
+  }, [filteredMapMerchants]);
+
+  useEffect(() => {
     userLocationRef.current = userLocation;
     const map = mapRef.current;
     if (!map || !map.isStyleLoaded()) return;
@@ -769,19 +862,19 @@ export default function MapView({
 
   const nearbyCount = useMemo(() => {
     if (!userLocation) return 0;
-    return mapMerchants.filter(
+    return filteredMapMerchants.filter(
       (m) =>
         distanceKm(userLocation.lat, userLocation.lon, m.lat, m.lon) <= 2.0,
     ).length;
-  }, [mapMerchants, userLocation]);
+  }, [filteredMapMerchants, userLocation]);
 
   const smartTop3 = useMemo(() => {
-    if (mapMerchants.length === 0) return [] as Merchant[];
+    if (filteredMapMerchants.length === 0) return [] as Merchant[];
 
     const map = mapRef.current;
     const center = map?.getCenter();
 
-    return [...mapMerchants]
+    return [...filteredMapMerchants]
       .map((m) => {
         const distancePenalty = center
           ? distanceKm(center.lat, center.lng, m.lat, m.lon) * 3
@@ -792,7 +885,7 @@ export default function MapView({
       .sort((a, b) => b.score - a.score)
       .slice(0, 3)
       .map((x) => x.merchant);
-  }, [mapMerchants]);
+  }, [filteredMapMerchants]);
 
   const showGeoBanner =
     locationPermission === "idle" &&
@@ -864,6 +957,73 @@ export default function MapView({
           </button>
         </div>
       )}
+
+      <div className="absolute top-4 left-4 z-20 max-w-[calc(100vw-7rem)] rounded-xl border border-white/15 bg-black/80 p-3 text-xs text-gray-200 shadow-xl backdrop-blur-sm">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-gray-500">
+            Filters
+          </span>
+          <button
+            onClick={() => toggleDiscoveryFilter("claimed")}
+            className={`rounded-full border px-2.5 py-1 text-[11px] ${
+              discoveryFilters.claimed
+                ? "border-[#00FF41]/40 bg-[#00FF41]/12 text-[#00FF41]"
+                : "border-white/15 bg-white/5 text-gray-300"
+            }`}
+          >
+            Claimed
+          </button>
+          <button
+            onClick={() => toggleDiscoveryFilter("recently_active")}
+            className={`rounded-full border px-2.5 py-1 text-[11px] ${
+              discoveryFilters.recently_active
+                ? "border-[#00FF41]/40 bg-[#00FF41]/12 text-[#00FF41]"
+                : "border-white/15 bg-white/5 text-gray-300"
+            }`}
+          >
+            Recently active
+          </button>
+          <button
+            onClick={() => toggleDiscoveryFilter("higher_confidence")}
+            className={`rounded-full border px-2.5 py-1 text-[11px] ${
+              discoveryFilters.higher_confidence
+                ? "border-[#F7931A]/40 bg-[#F7931A]/12 text-[#F7B267]"
+                : "border-white/15 bg-white/5 text-gray-300"
+            }`}
+          >
+            Higher confidence
+          </button>
+          <button
+            onClick={() => toggleDiscoveryFilter("repeated_success")}
+            className={`rounded-full border px-2.5 py-1 text-[11px] ${
+              discoveryFilters.repeated_success
+                ? "border-[#F7931A]/40 bg-[#F7931A]/12 text-[#F7B267]"
+                : "border-white/15 bg-white/5 text-gray-300"
+            }`}
+          >
+            Repeated success
+          </button>
+          {hasActiveFilters && (
+            <button
+              onClick={resetDiscoveryFilters}
+              className="rounded-full border border-white/20 px-2.5 py-1 text-[11px] text-gray-300 hover:bg-white/5"
+            >
+              Reset
+            </button>
+          )}
+        </div>
+        {hasActiveFilters && filteredMapMerchants.length === 0 && !isSearchingArea && (
+          <div className="mt-2 flex items-center justify-between gap-3 rounded-lg border border-white/10 bg-black/30 px-2.5 py-2 text-[11px] text-gray-400">
+            <span>No places match these filters in the current map area.</span>
+            <button
+              onClick={resetDiscoveryFilters}
+              className="text-gray-200 underline underline-offset-2"
+            >
+              Clear filters
+            </button>
+          </div>
+        )}
+      </div>
 
       <div className="absolute top-4 right-4 z-20 flex flex-col gap-2">
         <button
