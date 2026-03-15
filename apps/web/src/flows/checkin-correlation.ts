@@ -1,3 +1,6 @@
+// Canonical v2 check-in correlation is exact by event_id.
+// Relay publish may succeed independently, but any mismatch across provisional,
+// signed, published, or confirmed ids is treated as a hard failure.
 export function resolveCanonicalCheckinEventId(input: {
   provisionalEventId?: string | null;
   signedEventId?: string | null;
@@ -18,6 +21,8 @@ export function resolveCanonicalCheckinEventId(input: {
   return signedEventId;
 }
 
+// The confirm payload carries the exact signed event_id forward to the backend.
+// Backend acceptance of this payload is a durable handoff, not canonical ledger confirmation.
 export function buildCheckinConfirmPayload(input: {
   eventId: string;
   placeId: string;
@@ -52,6 +57,8 @@ export function buildCheckinStatusParams(input: {
   });
 }
 
+// Polling may continue only after an exact event_id match on a durable confirm response.
+// This preserves the separation between backend handoff and later canonical visibility.
 export function evaluateConfirmResponseForPolling(input: {
   httpOk: boolean;
   status: string | null;
