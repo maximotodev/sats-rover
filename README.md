@@ -1,123 +1,81 @@
-# SatsRover — Sovereign Coordination for the Bitcoin Economy
+# SatsRover
 
-SatsRover is an experimental platform for visualizing and verifying activity in the Bitcoin economy. It combines a modern map-based frontend with a cryptographic verification backend to turn untrusted signals into verifiable data.
+SatsRover is a Bitcoin merchant discovery app built on a Nostr publish path with backend-indexed reads. The repo is now post-core-migration for v2 check-in truth semantics: canonical confirmation comes from indexed backend read surfaces, not from optimistic client state or relay publish success alone.
 
-This repository is intentionally structured as a **full-stack operator workshop**: product-facing UI on the frontend, protocol enforcement and trust boundaries on the backend.
+## Current Status
 
----
+- Stable v2 check-in truth boundaries are implemented.
+- Merchant claim Phase 1 is implemented as an informational-first claim flow.
+- Place Profile v2 read models and local discovery filters are implemented.
+- The repo still contains some legacy compatibility residue. Treat the docs in `docs/` as the source of truth for current architecture.
 
-## Why SatsRover Exists
+## Monorepo Structure
 
-Most location and activity maps rely on centralized databases, moderation, and opaque trust assumptions.
+- `apps/web`: Next.js web client, Nostr publish flows, MerchantDrawer, map discovery UI.
+- `apps/api`: FastAPI read/write API, place and feed read surfaces, check-in confirm/status flows.
+- `apps/indexer`: Nostr indexer and reducers for canonical signal ingest and claim ingest.
+- `packages/protocol`: legacy runtime-adjacent residue; do not treat it as the canonical v2 protocol reference.
+- `docs`: current architecture, protocol, roadmap, ADRs, and contributor guidance.
 
-SatsRover explores a different model:
+## Architecture Summary
 
-- **Sovereign identity** instead of accounts
-- **Cryptographic verification** instead of moderation
-- **Protocol rules** instead of platform discretion
+SatsRover follows a strict write/read split:
 
-In short: **mathematics as moderation**.
+- Client writes: users sign and publish Nostr events from the web client.
+- Backend reads: UI truth comes from API + indexer-backed read models.
+- Canonical truth:
+  - `signals_v2_events` is the canonical immutable confirmation/history surface for check-ins.
+- Derived state:
+  - `signals_v2_state` is a rebuildable projection derived from the canonical ledger.
+  - place profile and discovery fields are derived read models layered on top of canonical data.
+- Durable trace:
+  - `checkin_submissions` persists confirm handoff and diagnostics, but it is not canonical confirmation truth.
+- Ephemeral state:
+  - Redis is used for cache, handoff, and polling only.
+- Claims:
+  - a merchant claim becomes user-visible only when canonical backend/indexer read state surfaces it.
+- UI:
+  - optimistic publish state is presentation only and must never be treated as truth.
 
-Every signal is assumed hostile until proven valid by cryptographic signature and canonical serialization rules.
+## Documentation Map
 
----
-
-## Architecture Overview
-
-```
-sats-rover/
-├── apps/
-│ ├── web/     # Next.js + TypeScript UI (maps, identity, UX)
-│ ├── api/     # FastAPI + Postgres/PostGIS services
-│ └── indexer/ # Nostr ingestion + enrichment worker
-├── docs/
-│ └── architecture.md
-└── README.md
-```
-
-For a deeper system design and tradeoff analysis, see `docs/architecture.md`.
-
----
-
-## Frontend (apps/web)
-
-- **Next.js (App Router)**
-- **TypeScript**
-- **Tailwind CSS**
-- **OpenStreetMap**
-- Nostr identity and wallet-aware UX
-
-The frontend focuses on **product clarity, UX, and signal visualization** rather than trust enforcement.
-
----
-
-## Backend (apps/api)
-
-- **FastAPI**
-- **Python**
-- **Pydantic**
-- **secp256k1 / coincurve**
-
-The backend acts as a **hostile verification layer**:
-
-- Enforces **NIP-01 canonical serialization**
-- Computes deterministic event IDs
-- Verifies Schnorr signatures
-- Rejects unverifiable or malformed events
-
-No trust is placed in relays, clients, or inputs—only in cryptographic proof.
-
----
-
-## Protocol Focus
-
-- **Nostr**
-  - NIP-01: Canonical event serialization and hashing
-  - NIP-05: Identity conventions (where applicable)
-- **Bitcoin-adjacent cryptography**
-  - secp256k1 Schnorr signatures
-  - Deterministic verification over convenience
-
----
-
-## AI-Native Development Workflow
-
-This project is built using an **AI-native workflow**.
-
-LLMs are used to:
-
-- Scaffold boilerplate
-- Explore architectural variants
-- Accelerate iteration speed
-
-Critical paths (cryptography, serialization, trust boundaries) are:
-
-- Manually designed
-- Explicitly reviewed
-- Enforced with strict invariants
-
-AI handles speed.  
-I handle correctness.
-
----
-
+- [Architecture](docs/architecture.md): current implemented system design and truth boundaries.
+- [Protocol Reference](docs/protocol/satsrover-v2.json): current v2 event shapes and protocol expectations.
+- [Roadmap](docs/roadmap.md): completed, active, next, and deferred workstreams.
+- [ADRs](docs/adr/README.md): durable architecture decisions.
+- [Contributor Guide](docs/contributor-guide.md): repo navigation and safe extension rules.
+- [Local Development](docs/local-dev.md): local environment bootstrap and smoke checks.
 
 ## Local Development
 
-For full-stack local setup (PostGIS + Redis + API + web + indexer), see `docs/local-dev.md`.
+Use the full local guide in [docs/local-dev.md](docs/local-dev.md). The shortest path is:
 
-## Getting Started (Backend)
+1. `docker compose up -d`
+2. API: create `apps/api/.venv`, install dependencies, run `alembic upgrade head`, then `uvicorn app.main:app --reload --port 8000`
+3. Web: `pnpm install` then `pnpm --filter @satsrover/web dev`
+4. Indexer: `pnpm --filter @satsrover/indexer start`
 
-```bash
-cd apps/api
+Useful root scripts:
 
-# Create virtual environment
-python3 -m venv .venv
-source .venv/bin/activate
+- `pnpm ingest:btcmap`
+- `pnpm rebuild:signals-v2-state`
+- `pnpm typecheck`
 
-# Install dependencies
-pip install -r requirements.txt
+## Current Product Surfaces
 
-# Run API
-uvicorn app.main:app --reload
-```
+- Map-based place discovery from `/v1/places` via the web `/api/merchants` proxy.
+- MerchantDrawer check-in publish, backend confirm, and canonical confirmation polling.
+- Merchant claim publication with canonical read-state rendering.
+- Place Profile v2 summaries for freshness, confidence, and trust signals.
+- Local-only discovery filters driven by existing derived read-model fields.
+
+## Guidance For New Work
+
+Follow the existing truth boundaries:
+
+- do not treat relay publish success as canonical confirmation
+- do not treat Redis as authoritative state
+- do not infer claim or place-profile truth from optimistic UI
+- extend existing read surfaces before inventing parallel fetch paths
+
+If you change architecture, update the ADRs and `docs/architecture.md`. If you change protocol meaning, update `docs/protocol/satsrover-v2.json`. If you change priorities or migration state, update `docs/roadmap.md`.

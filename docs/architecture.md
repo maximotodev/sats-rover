@@ -1,295 +1,212 @@
-# SatsRover Architecture (Primal-Inspired Reliability Design)
-
-This document defines the current **production-oriented system design** for SatsRover, including the stable v2 check-in truth boundaries, optimized for reliability, low-latency UX, and anti-fragile Nostr + Lightning flows.
-
-> Guiding idea copied from Primal’s model: **clients publish to a decentralized network, but reads come from a deterministic indexed backend**.
-
----
-
-## 1) Product SLOs (what the architecture must guarantee)
-
-### User-facing SLO targets
-- **P95 map viewport load:** `< 700ms` (warm cache), `< 2s` (cold cache).
-- **P95 place drawer load:** `< 500ms` for place summary + confidence.
-- **Signal visibility latency:** `< 5s` from publish to API read-path visibility.
-- **Availability target:** `99.9%` for `/v1/places` and `/v1/places/:id/feed`.
-
-### Why this matters
-If discovery or proof is flaky, users interpret the product as untrustworthy (“I paid, but nothing happened”). Reliability is the first growth feature.
-
----
-
-## 2) Architecture principles
-
-1. **Indexed reads, decentralized writes**
-   - Client can publish signed events to relays.
-   - Read experience must come from backend cache/index.
-2. **Canonical IDs over fuzzy joins**
-   - Every place must resolve to one canonical `place_id`.
-3. **Deterministic ingest pipeline**
-   - ETL jobs are replayable and idempotent.
-4. **Evidence-weighted trust**
-   - Signals are stored with provenance and confidence inputs.
-5. **Graceful degradation**
-   - If relays/Overpass fail, API still serves stale-but-valid cached results.
-
----
-
-## 3) Service topology (target)
-
-```
-┌───────────────────────────────┐
-│          Web App (Next)       │
-│  - map UX, onboarding, wallet │
-│  - publishes signed events    │
-└──────────────┬────────────────┘
-               │
-               v
-┌──────────────────────────────────────────────┐
-│            Rover API (FastAPI)              │
-│  - auth + rate limiting                      │
-│  - /v1/places, /v1/places/:id, /feed        │
-│  - /checkins/intent + /confirm              │
-│  - cache orchestration + feature flags       │
-└──────────────┬─────────────────────┬─────────┘
-               │                     │
-               v                     v
-      ┌────────────────┐     ┌─────────────────┐
-      │ Postgres+GIS   │     │ Redis           │
-      │ canonical data │     │ hot cache + RL  │
-      └───────┬────────┘     └────────┬────────┘
-              ^                        ^
-              │                        │
-      ┌───────┴────────────────────────┴───────┐
-      │          Rover Indexer Worker          │
-      │ - Nostr relay ingestion                 │
-      │ - Overpass/BTCMap ingestion             │
-      │ - normalization + dedupe + scoring      │
-      └─────────────────────────────────────────┘
-```
-
-### Current repository mapping
-- `apps/web` → Web App.
-- `apps/api` → Rover API.
-- `apps/indexer` → Indexer worker.
-
----
-
-## 4) Data model (canonical, derived, and cache)
-
-## 4.1 Canonical entities
-
-### `places`
-- `id` (PK, string): canonical ID (`osm:node:123`, `btcmap:abc`, `manual:uuid`).
-- `name` (text).
-- `source_primary` (enum): `osm|btcmap|manual`.
-- `source_refs` (jsonb): all known upstream IDs.
-- `tags` (jsonb).
-- `location` (geometry POINT, SRID 4326).
-- `status` (enum): `active|stale|closed|unverified`.
-- `updated_at` (timestamp).
-
-Indexes:
-- `GIST(location)` for viewport queries.
-- `BTREE(status, updated_at)` for stale sweeps.
-
-### `signals_v2_events` (canonical ledger)
-- Immutable canonical ingestion/confirmation surface for user-visible v2 confirmation.
-- One row per ingested event id (`event_id` PK), including parsed signal fields (`pubkey`, `place_id`, `status`, `created_at`, `day_utc`) and canonical event/history payload fields.
-- `event_id` existence in this table is canonical truth for v2 confirmation.
-
-### `checkin_submissions` (durable trace, not canonical confirmation truth)
-- Durable API submission trace keyed by `event_id`.
-- Used for request durability/idempotency and operator diagnostics.
-- Must not be treated as canonical confirmation by itself.
+# SatsRover v2 Architecture
 
-## 4.2 Derived entities
+This document describes the current implemented architecture of SatsRover. It is intended for contributors extending the repo after the core v2 migration.
 
-### `signals_v2_state` (derived/materialized state)
-- Deterministic reduced state derived from `signals_v2_events`.
-- Used for feed/state reads and summary projections.
-- Rebuildable from the canonical ledger.
+## System Overview
 
-## 4.3 Cache keys (Redis)
+SatsRover is a merchant discovery and check-in system with:
 
-- `places:bbox:{hash}` → serialized viewport response (TTL 60–180s).
-- `place:feed:{place_id}` → recent feed payload (TTL 15–60s).
-- `place:summary:{place_id}` → confidence + metadata (TTL 60–300s).
-- `rl:checkin:{pubkey}:{place_id}` → burst control window.
-- `checkin:pending:{event_id}`, `checkin:meta:{event_id}`, `checkin:probe:{event_id}` → ephemeral handoff/polling only (non-durable, non-canonical).
+- decentralized client publish over Nostr
+- backend-indexed canonical reads
+- derived place and discovery read models for UI
 
-### Legacy compatibility residue
-- `signals` (legacy table) may still exist for compatibility boundaries.
-- It is not canonical for user-visible v2 confirmation semantics.
+The system is intentionally not a social network, events platform, or wallet app. Bitcoin and Nostr are used to support merchant discovery, check-in evidence, and informational merchant presence.
 
----
+## Component Map
 
-## 5) Primal-style read/write split
+### `apps/web`
 
-### Write path (decentralized)
-1. Client signs/publishes Nostr signal event.
-2. Client posts `/v1/checkins/confirm` with the same signed `event_id` + metadata.
-3. API persists `checkin_submissions` as durable trace (not canonical confirmation).
-4. Canonical confirmation exists only when that exact `event_id` is present in `signals_v2_events`.
-5. `signals_v2_state` is materialized from canonical events.
-6. Redis remains ephemeral handoff/polling state and does not define truth.
+- publishes signed check-in and claim events
+- proxies browser reads through `/api/merchants` and check-in proxy routes
+- renders map discovery, MerchantDrawer, check-in UX, claim UX, and place-profile summaries
+- may show optimistic/pending state, but does not own truth
 
-### Read path (deterministic)
-1. Client loads places/feed from API only.
-2. API serves from Redis hot cache.
-3. On miss, API queries Postgres and repopulates cache.
-4. UI never blocks on live relay fetch.
+### `apps/api`
 
----
+- serves `/v1/places`, place feeds, check-in confirm, and check-in status/debug surfaces
+- reads canonical and derived state from Postgres
+- uses Redis for cache, intent handoff, and short-lived polling state
+- exposes the backend-driven read surfaces the UI relies on
 
-## 6) Current API contract (/v1 routes)
+### `apps/indexer`
 
-### `GET /v1/places?bbox={minLon,minLat,maxLon,maxLat}&limit=600`
-Returns canonical places for viewport.
+- subscribes to Nostr relays
+- validates and ingests check-in events into the canonical ledger
+- reduces canonical events into `signals_v2_state`
+- ingests merchant claims into canonical claim read state
 
-### `GET /v1/places/{place_id}`
-Returns canonical place detail + source provenance.
+### `packages`
 
-### `GET /v1/places/{place_id}/feed?cursor=...`
-Returns recent signals, confidence, and summary counters.
+- `packages/protocol` currently contains legacy runtime-adjacent residue and does not match the current live v2 protocol. Do not use it as the source of truth for new work.
 
-### `POST /v1/checkins/intent`
-Creates short-lived intent token (anti-replay and rate-limit gate).
+## Truth Model
 
-### `POST /v1/checkins/confirm`
-Accepts signed event + intent token + optional payment evidence.
+### Canonical truth
 
-Response includes:
-- `status`: `pending|ok|rejected|failed` (route-dependent mapping)
-- `reason_code` for failures.
+- `signals_v2_events`
+  - canonical immutable confirmation/history surface for v2 check-ins
+  - exact `event_id` presence here is canonical confirmation truth
 
-User-visible canonical confirmation source: `signals_v2_events` ledger presence by `event_id`.
+### Derived/materialized state
 
----
+- `signals_v2_state`
+  - rebuildable derived state from `signals_v2_events`
+  - used for read summaries, recent activity, and place-level projections
+- place profile summaries
+  - derived in API read paths from claim state plus `signals_v2_state`
+- local discovery filter results
+  - derived in the web client from the already-loaded merchant payload
 
-## 7) Critical protocol decisions
+### Durable trace, not canonical truth
 
-## 7.1 Canonical place tag
-Use one tag namespace everywhere:
-- publish: `['place', '<canonical_place_id>']`
-- query: `#place=[<canonical_place_id>]`
+- `checkin_submissions`
+  - durable confirm handoff and operator/debug trace
+  - useful for idempotency, raw event metadata, and diagnostics
+  - must not be treated as canonical confirmation on its own
 
-Do not mix `#r` or alternative IDs for primary lookups.
+### Ephemeral state
 
-## 7.2 Canonical place ID strategy
-Normalize all source IDs at ingestion:
-- OSM node/way/relation → `osm:{type}:{id}`
-- BTCMap entry → `btcmap:{id}`
-- community submission → `manual:{uuid}`
+- Redis
+  - viewport cache
+  - check-in intent tokens
+  - short-lived pending/meta/probe status keys
+  - never authoritative for canonical confirmation or claim truth
 
-Keep source crosswalk in `source_refs`.
+### Compatibility residue
 
-## 7.3 Security posture
-- Prefer NIP-07 / NIP-46 for key custody.
-- Persistent local key storage must be encrypted (WebCrypto + passphrase/device key).
-- Treat localStorage plaintext secrets as disallowed in production mode.
+- legacy `signals` table and related v1 fallback paths still exist in parts of API/indexer code for compatibility and diagnostics
+- `/v1/...` route names remain current API paths even though the runtime truth model is v2
+- this residue must not be treated as the canonical v2 model
 
----
+## End-to-End Flows
 
-## 8) Trust and scoring model
+### Check-in publish -> confirm -> canonical confirmation
 
-Confidence score (0–100) = weighted sum of:
-- `recency_weight` (recent activity counts more).
-- `success_ratio_weight` (`success / total`).
-- `unique_pubkey_weight` (anti-single-user gaming).
-- `source_quality_weight` (`btcmap verified` > `manual`).
-- `penalty_weight` for suspicious bursts or repeated failures.
+1. Web signs and publishes a kind `30331` signal event with canonical `place` and `status` tags.
+2. Relay publish success is telemetry only. It is not canonical confirmation.
+3. Web sends `/v1/checkins/confirm` with the exact signed `event_id` and associated metadata.
+4. API persists `checkin_submissions` as durable trace.
+5. Indexer ingests the Nostr event into `signals_v2_events`.
+6. Once the exact `event_id` is present in `signals_v2_events`, canonical confirmation exists.
+7. `signals_v2_state` is updated from the canonical ledger.
+8. MerchantDrawer and feeds observe backend/indexer read state, not local publish assumptions.
 
-Store score components to make moderation and tuning explainable.
+### Claim publish -> ingest -> canonical read state
 
----
+1. Web signs and publishes a kind `30078` claim event using:
+   - `t=satsrover-claim`
+   - `v=2`
+   - `d=claim:<place_id>`
+   - `place=<place_id>`
+   - `role=owner`
+2. Local publish success is not canonical claim truth.
+3. Indexer validates the claim lane and upserts the latest claim into `app_state_claims`.
+4. API reads latest claim state per place and exposes a compact claim summary through `/v1/places`.
+5. MerchantDrawer shows `Claimed` or `Unclaimed` only from canonical backend/indexer read data.
 
-## 9) Reliability and failure modes
+The current implementation models “a claim event exists,” not verified ownership.
 
-### Failure: Overpass downtime
-- Mitigation: scheduled ingestion + cached snapshots + BTCMap fallback.
-- Outcome: map stays available with slightly stale data.
+### Place profile/read-model flow
 
-### Failure: relay lag/partial propagation
-- Mitigation: multi-relay ingestion + delayed reconciliation pass.
-- Outcome: signals may appear with `pending` state before canonical ledger confirmation.
+1. API loads places from PostGIS-backed `places`.
+2. API joins:
+   - latest claim summary from `app_state_claims`
+   - recent activity and success aggregates from `signals_v2_state`
+3. API derives compact read-model fields such as:
+   - freshness labels
+   - confidence labels
+   - recent/repeated success counters
+   - compact trust-signal explanations
+4. Web `/api/merchants` sanitizes and forwards those fields to the map UI.
+5. MerchantDrawer renders those derived fields as informational summaries.
 
-### Failure: cache outage (Redis)
-- Mitigation: direct Postgres fallback, reduced QPS via stricter limits.
-- Outcome: degraded latency, no data loss.
+### Discovery/filter flow
 
-### Failure: spam wave
-- Mitigation: per-IP/pubkey/place limits + daily uniqueness + optional payment evidence.
-- Outcome: bounded blast radius and controlled confidence pollution.
+1. `MapView` fetches the current viewport’s merchant payload from `/api/merchants`.
+2. The fetched merchant list is stored as the source collection.
+3. Local-only filters derive a filtered projection from the current loaded set.
+4. Markers, nearby count, and Smart Explore all use the filtered projection.
+5. No canonical data is mutated by the filtering flow.
 
----
+## Current Read Surfaces
 
-## 10) Infra and deployment tradeoffs
+### `/v1/places`
 
-## Option A: single-region MVP (recommended first)
-- One API deployment, one Postgres, one Redis, one worker pool.
-- Cheapest, simplest to operate.
-- Good until sustained global traffic causes latency spikes.
+Current place payload includes:
 
-## Option B: multi-region read replicas
-- Regional API + cache nodes, central write primary.
-- Better p95 globally.
-- More complexity: replication lag and invalidation strategy.
+- base place metadata
+- `claim`
+  - `claimed`
+  - `claimant_pubkey`
+  - `claim_event_id`
+  - `claim_created_at`
+- `profile`
+  - confidence/freshness labels
+  - recent signal counts
+  - last signal / last confirmed timestamps
+  - booleans used by discovery filters
+  - compact trust-signal explanations
 
-## Option C: serverless-only
-- Low ops overhead.
-- Weak fit for sustained ingest streams and PostGIS-heavy workloads.
+### `/v1/places/{place_id}/feed`
 
-Recommendation:
-- Start with **Option A**, instrument aggressively, graduate to read replicas once p95 and QPS demand it.
+- recent signal feed and feed summary
+- canonical or compatibility-backed read path depending on schema availability
 
----
+### Web `/api/merchants`
 
-## 11) Observability plan
+- sanitized place payload for browser use
+- source for map rendering, MerchantDrawer data, and discovery filters
 
-### Metrics
-- API: request rate, p50/p95/p99 latency, 5xx rate.
-- Cache: hit ratio, miss ratio, eviction rate.
-- Indexer: events/sec, lag to head relay timestamp.
-- Data quality: percentage of places with canonical source_refs, orphan signal rate.
+## Product State Represented In The Repo
 
-### Tracing + logs
-- Correlate `checkin_intent_id` across API and indexer.
-- Structured logs with `place_id`, `pubkey_hash`, `reason_code`.
-- Operator/debug surfaces may normalize stale Redis pending-like traces once canonical ledger truth exists, to avoid contradictory diagnostics; this is presentation behavior only and does not make Redis authoritative.
+Implemented:
 
-### Alerts
-- `/v1/places` 5xx > 1% for 5 minutes.
-- Index lag > 60 seconds for 10 minutes.
-- Cache hit ratio < 70% sustained.
+- v2 canonical check-in confirmation semantics
+- claim Phase 1 informational flow
+- Place Profile v2 derived read model
+- local discovery filters using derived profile fields
 
----
+Not implemented:
 
-## 12) Migration state (current truth model)
+- merchant verification or ownership proof adjudication
+- moderation or disputes
+- trust-weight redesign
+- social/chat/events features
+- server-side discovery filtering or search redesign
 
-The repo is post-core-migration for v2 truth boundaries:
-- `signals_v2_events` is canonical immutable truth for user-visible confirmation/history.
-- `signals_v2_state` is derived/materialized state from canonical events.
-- `checkin_submissions` is a durable submission trace only.
-- Redis is ephemeral handoff/polling state only.
+## Contributor Rules For Safe Extensions
 
-Remaining migration work is normalization and cleanup around these already-implemented boundaries, not truth-model redesign.
+When adding new features:
 
----
+- keep writes and reads separate
+- do not promote optimistic UI to truth
+- do not infer confirmation from relay publish success
+- do not treat `checkin_submissions` as canonical confirmation
+- do not treat Redis as authoritative state
+- preserve exact `event_id` and `place_id` correlation
+- prefer extending existing `/v1/places` and `/api/merchants` read surfaces before adding parallel endpoints
+- if a change alters architecture or truth boundaries, add or update an ADR and this file
 
-## 13) Architecture decision records (ADRs)
+## Deferred Scope
 
-- **ADR-001:** Reads served from backend index, not client relay fanout.
-- **ADR-002:** `place` is canonical Nostr tag for place identity.
-- **ADR-003:** Canonical place IDs are namespaced and source-normalized.
-- **ADR-004:** Redis used for hot path caching and rate limiting.
-- **ADR-005:** Check-in lifecycle is intent → durable submission trace → canonical ledger visibility.
+Intentionally deferred from the current repo state:
 
----
+- ownership verification and claim policy
+- multi-claim adjudication
+- distributed merchant profile overrides via canonical ingest
+- moderation/dispute systems
+- ranking or trust-model redesign
+- broader discovery/search backend work
 
-## 14) TL;DR
+## Legacy And Migration Notes
 
-- Use Primal’s reliability pattern: decentralized publish, centralized indexed reads.
-- Make canonical place identity non-negotiable.
-- Design for failure: stale cache beats empty screen.
-- Canonical confirmation truth for v2 is `signals_v2_events` by exact `event_id`; derived state and ephemeral traces assist reads/diagnostics but do not override ledger truth.
+Historical migrations and compatibility code still reference earlier tables or protocol assumptions. Treat them as implementation history, not current architecture:
+
+- migration files are historical records and may mention older claim/storage approaches
+- some API/indexer paths still contain v1 compatibility logic for missing tables or legacy reads
+- `packages/protocol` is stale relative to the live v2 implementation
+
+When cleaning residue in the future, prefer:
+
+- documenting legacy status first
+- removing only after imports and runtime dependency edges are proven absent

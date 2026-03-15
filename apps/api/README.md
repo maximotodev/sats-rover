@@ -1,17 +1,22 @@
-# API Service
+# SatsRover API
 
-## Environment
+This package contains the FastAPI service that serves canonical and derived read surfaces plus check-in confirm/status flows.
 
-Required environment variables:
+## Current Responsibilities
 
-- `DATABASE_URL`
-- `REDIS_URL`
+- `/v1/places` and related place/feed reads
+- check-in confirm and status routes
+- Redis-backed cache and polling integration
+- schemas and services for claim and place-profile read models
 
-For local development, `apps/api/.env` is loaded automatically by `app.core.settings.Settings` (`env_file=".env"`).
-Environment variables set in the shell still override values from `.env`.
+## Important Boundaries
 
-## Run Locally
+- `signals_v2_events` is canonical check-in confirmation/history
+- `checkin_submissions` is durable trace only
+- Redis is ephemeral only
 
-```bash
-cd apps/api && . .venv/bin/activate && uvicorn app.main:app --reload --port 8000
-```
+For architecture and contributor context, start at the repo root docs:
+
+- [`README.md`](../../README.md)
+- [`docs/architecture.md`](../../docs/architecture.md)
+- [`docs/local-dev.md`](../../docs/local-dev.md)

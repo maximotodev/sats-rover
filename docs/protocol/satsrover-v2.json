@@ -115,11 +115,11 @@
               "recommended_max_bytes": 4096
             }
           },
-          "profile": {
-            "name": "place_profile_override",
-            "replaceable_key": "(pubkey, d)",
-            "d_format": "profile:<place_id>",
-            "required_tags": [
+      "profile": {
+        "name": "place_profile_override",
+        "replaceable_key": "(pubkey, d)",
+        "d_format": "profile:<place_id>",
+        "required_tags": [
               ["t", "satsrover-profile"],
               ["t", "satsrover"],
               ["v", "2"],
@@ -141,7 +141,8 @@
                 "note": "optional string"
               },
               "recommended_max_bytes": 4096
-            }
+            },
+            "implementation_status": "Documented protocol subtype only. The current repo does not ingest or surface this subtype through the canonical backend read path."
           }
         }
       }
@@ -183,7 +184,8 @@
             "#v": ["2"]
           },
           "notes": [
-            "Optional; only ingest if you want distributed place profile data."
+            "Optional protocol lane.",
+            "The current repo does not subscribe to or ingest satsrover-profile events."
           ]
         }
       ]
@@ -304,40 +306,28 @@
       },
       "outputs": [
         {
-          "table": "signals",
-          "mode": "insert",
+          "table": "signals_v2_events",
+          "mode": "insert_canonical_ledger",
           "schema": {
             "event_id": "hex64",
             "pubkey": "hex64",
             "created_at": "int",
             "place_id": "string",
             "status": "enum",
-            "comment": "string",
-            "geohash": "optional string",
+            "content": "string",
+            "g": "optional string",
             "amount_msat": "optional string",
-            "zap_event_id": "optional hex64",
+            "zap": "optional hex64",
             "bolt11": "optional string",
             "client": "optional string",
             "relay": "string"
           }
         },
         {
-          "table": "place_last_signal",
-          "mode": "upsert",
-          "key": "place_id",
+          "table": "signals_v2_state",
+          "mode": "upsert_projection",
+          "key": ["pubkey", "place_id", "day_utc"],
           "rule": "keep newest by created_at, tie-breaker by event_id"
-        },
-        {
-          "table": "signals_by_place_day",
-          "mode": "upsert_increment",
-          "key": ["place_id", "day_utc", "status"],
-          "rule": "increment count"
-        },
-        {
-          "table": "signals_by_pubkey_day",
-          "mode": "upsert_increment",
-          "key": ["pubkey", "day_utc"],
-          "rule": "increment count; used for abuse analytics"
         }
       ]
     },
@@ -352,21 +342,23 @@
       },
       "outputs": [
         {
-          "table": "app_state",
-          "mode": "upsert_latest",
+          "table": "app_state_claims",
+          "mode": "upsert_latest_claim",
           "key": ["pubkey", "d"],
           "schema": {
             "pubkey": "hex64",
             "d": "string",
-            "kind": "int",
             "created_at": "int",
             "event_id": "hex64",
             "place_id": "string",
-            "subtype": "claim|profile",
-            "content_json": "json",
-            "relay": "string"
+            "role": "string",
+            "content": "string"
           }
         }
+      ],
+      "implementation_notes": [
+        "The current repo ingests the claim subtype into app_state_claims.",
+        "The optional profile subtype is documented but not currently consumed by the live indexer/API read path."
       ],
       "policy_layer_optional": {
         "single_owner_per_place": {
