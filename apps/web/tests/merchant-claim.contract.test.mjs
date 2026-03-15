@@ -59,7 +59,7 @@ test("merchant drawer claim UI is canonical-read-driven and non-authoritative", 
     "drawer should keep local publish success non-authoritative",
   );
   assert.ok(
-    source.includes("Informational only. Claim publication is not verified ownership."),
+    source.includes("Derived from canonical read state only. Not verified ownership."),
     "drawer should not imply verified ownership",
   );
 });

@@ -378,8 +378,10 @@ export default function MerchantDrawer({
     tagTruthy(merchant?.tags?.["payment:onchain"]);
   const merchantClaim = merchant?.claim ?? null;
   const merchantClaimed = merchantClaim?.claimed === true;
+  const merchantProfile = merchant?.profile ?? null;
 
-  const reliability = placeFeed.confidenceScore / 100;
+  const reliability =
+    (merchantProfile?.confidenceScore ?? placeFeed.confidenceScore) / 100;
 
   const feedItems = placeFeed.items;
   const visibleItems = useMemo(
@@ -393,15 +395,10 @@ export default function MerchantDrawer({
     const first = feedItems.find((item) => item.status === "success");
     return first ? first.createdAtMs : null;
   }, [feedItems]);
-
-  const successStreak = useMemo(() => {
-    let streak = 0;
-    for (const item of feedItems) {
-      if (item.status === "success") streak += 1;
-      else break;
-    }
-    return streak;
-  }, [feedItems]);
+  const displayedLastConfirmedAt =
+    merchantProfile?.lastConfirmedAt != null
+      ? merchantProfile.lastConfirmedAt * 1000
+      : lastConfirmedAt;
 
   const latestEventId = feedItems[0]?.id || activeCheckinId || "";
 
@@ -933,32 +930,49 @@ export default function MerchantDrawer({
                 <div className="flex items-start justify-between gap-3">
                   <div>
                     <p className="text-[11px] uppercase tracking-[0.18em] text-gray-500">
-                      Merchant Claim
+                      Place Profile
                     </p>
-                    <p
-                      className={cn(
-                        "mt-1 text-sm font-semibold",
-                        merchantClaimed ? "text-[#00FF41]" : "text-gray-200",
-                      )}
-                    >
-                      {merchantClaim?.claimed ? "Claimed" : "Unclaimed"}
-                    </p>
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      <span
+                        className={cn(
+                          "inline-flex items-center rounded-full border px-2 py-1 text-[11px] font-semibold",
+                          merchantClaimed
+                            ? "border-[#00FF41]/35 bg-[#00FF41]/10 text-[#00FF41]"
+                            : "border-white/15 bg-white/5 text-gray-200",
+                        )}
+                      >
+                        {merchantClaim?.claimed ? "Claimed" : "Unclaimed"}
+                      </span>
+                      <span className="inline-flex items-center rounded-full border border-white/15 bg-white/5 px-2 py-1 text-[11px] text-gray-200">
+                        {merchantProfile?.freshnessLabel || "Quiet recently"}
+                      </span>
+                      <span className="inline-flex items-center rounded-full border border-[#F7931A]/30 bg-[#F7931A]/10 px-2 py-1 text-[11px] text-[#F7B267]">
+                        {merchantProfile?.confidenceLabel || "Low confidence"}
+                      </span>
+                    </div>
                     {merchantClaim?.claimed && merchantClaim?.claimantPubkey && (
-                      <p className="mt-1 text-[11px] text-gray-400">
+                      <p className="mt-2 text-[11px] text-gray-400">
                         Latest claim published by{" "}
                         <span className="font-mono text-gray-300">
                           {shortHex(merchantClaim.claimantPubkey)}
                         </span>
                       </p>
                     )}
-                    {merchantClaim?.claimed && merchantClaim?.claimCreatedAt && (
-                      <p className="mt-1 text-[11px] text-gray-500">
-                        claim_created_at:{" "}
-                        {new Date(merchantClaim.claimCreatedAt * 1000).toISOString()}
-                      </p>
-                    )}
+                    {merchantProfile?.trustSignals &&
+                      merchantProfile.trustSignals.length > 0 && (
+                        <div className="mt-2 flex flex-wrap gap-1.5">
+                          {merchantProfile.trustSignals.map((signal) => (
+                            <span
+                              key={signal}
+                              className="inline-flex items-center rounded-full border border-white/10 bg-black/25 px-2 py-1 text-[10px] text-gray-300"
+                            >
+                              {signal}
+                            </span>
+                          ))}
+                        </div>
+                      )}
                     <p className="mt-2 text-[11px] text-gray-500">
-                      Informational only. Claim publication is not verified ownership.
+                      Derived from canonical read state only. Not verified ownership.
                     </p>
                     {claimSubmitState === "submitted" && (
                       <p className="mt-2 text-[11px] text-[#F7B267]">
@@ -1014,27 +1028,29 @@ export default function MerchantDrawer({
 
               <div className="mt-3 grid grid-cols-2 gap-3 rounded-xl border border-white/10 bg-black/35 p-3 text-[11px] sm:grid-cols-4">
                 <div>
-                  <p className="text-gray-500">Total signals</p>
+                  <p className="text-gray-500">Recent signals</p>
                   <p className="mt-1 font-semibold text-gray-100">
-                    {totalSignals}
+                    {merchantProfile?.recentSignals ?? totalSignals}
                   </p>
                 </div>
                 <div>
-                  <p className="text-gray-500">Success count</p>
+                  <p className="text-gray-500">Recent successes</p>
                   <p className="mt-1 font-semibold text-[#00FF41]">
-                    {successSignals}
+                    {merchantProfile?.recentSuccesses ?? successSignals}
                   </p>
                 </div>
                 <div>
-                  <p className="text-gray-500">Current streak</p>
+                  <p className="text-gray-500">Confidence</p>
                   <p className="mt-1 font-semibold text-[#F7931A]">
-                    {successStreak}
+                    {Math.round((merchantProfile?.confidenceScore ?? placeFeed.confidenceScore) || 0)}%
                   </p>
                 </div>
                 <div>
                   <p className="text-gray-500">Last confirmed</p>
                   <p className="mt-1 font-semibold text-gray-100">
-                    {lastConfirmedAt ? formatRelative(lastConfirmedAt) : "n/a"}
+                    {displayedLastConfirmedAt
+                      ? formatRelative(displayedLastConfirmedAt)
+                      : "n/a"}
                   </p>
                 </div>
               </div>

@@ -9,6 +9,7 @@ from app.schemas.signal import CheckinConfirmIn, PlaceFeedOut
 from app.services.places_service import (
     build_place_claim_summary,
     build_place_out,
+    build_place_profile_summary,
     parse_bbox,
 )
 from app.services.signals_service import (
@@ -81,6 +82,32 @@ class PlacesAndSignalsTests(unittest.TestCase):
         )
         self.assertTrue(place.claim.claimed)
         self.assertEqual(place.claim.claim_event_id, "c" * 64)
+
+    def test_build_place_profile_summary_explains_recent_activity(self):
+        claim = build_place_claim_summary(
+            {
+                "claim_event_id": "e" * 64,
+                "claimant_pubkey": "f" * 64,
+                "claim_created_at": 1_710_000_010,
+            }
+        )
+        profile = build_place_profile_summary(
+            {
+                "total_signals": 4,
+                "total_successes": 3,
+                "recent_signals": 3,
+                "recent_successes": 2,
+                "last_signal_at": 1_710_000_100,
+                "last_confirmed_at": 1_710_000_090,
+            },
+            claim,
+            now_sec=1_710_000_100,
+        )
+        self.assertEqual(profile.confidence_label, "Higher confidence")
+        self.assertEqual(profile.freshness_label, "Recently active")
+        self.assertTrue(profile.repeated_success_signals)
+        self.assertIn("Merchant claim published", profile.trust_signals)
+        self.assertIn("Multiple recent successful signals", profile.trust_signals)
 
 
 class _MappingsResult:

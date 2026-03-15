@@ -70,6 +70,20 @@ type ClaimRecord = {
   claim_event_id?: string | null;
   claim_created_at?: number | null;
 } | null;
+type ProfileRecord = {
+  confidence_score?: number | null;
+  confidence_label?: string | null;
+  freshness_label?: string | null;
+  recent_signals?: number | null;
+  recent_successes?: number | null;
+  last_signal_at?: number | null;
+  last_confirmed_at?: number | null;
+  recently_active?: boolean | null;
+  active_this_week?: boolean | null;
+  higher_confidence?: boolean | null;
+  repeated_success_signals?: boolean | null;
+  trust_signals?: string[] | null;
+} | null;
 type Source = "sr" | "btcmap" | "osm";
 type AppErrorKind =
   | "CONFIG_ERROR"
@@ -327,6 +341,55 @@ function sanitizeClaim(raw: ClaimRecord) {
   };
 }
 
+function sanitizeProfile(raw: ProfileRecord) {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+
+  return {
+    confidenceScore:
+      typeof raw.confidence_score === "number" &&
+      Number.isFinite(raw.confidence_score)
+        ? raw.confidence_score
+        : 0,
+    confidenceLabel:
+      typeof raw.confidence_label === "string" && raw.confidence_label
+        ? raw.confidence_label
+        : "Low confidence",
+    freshnessLabel:
+      typeof raw.freshness_label === "string" && raw.freshness_label
+        ? raw.freshness_label
+        : "Quiet recently",
+    recentSignals:
+      typeof raw.recent_signals === "number" && Number.isFinite(raw.recent_signals)
+        ? raw.recent_signals
+        : 0,
+    recentSuccesses:
+      typeof raw.recent_successes === "number" &&
+      Number.isFinite(raw.recent_successes)
+        ? raw.recent_successes
+        : 0,
+    lastSignalAt:
+      typeof raw.last_signal_at === "number" && Number.isFinite(raw.last_signal_at)
+        ? raw.last_signal_at
+        : null,
+    lastConfirmedAt:
+      typeof raw.last_confirmed_at === "number" &&
+      Number.isFinite(raw.last_confirmed_at)
+        ? raw.last_confirmed_at
+        : null,
+    recentlyActive: raw.recently_active === true,
+    activeThisWeek: raw.active_this_week === true,
+    higherConfidence: raw.higher_confidence === true,
+    repeatedSuccessSignals: raw.repeated_success_signals === true,
+    trustSignals: Array.isArray(raw.trust_signals)
+      ? raw.trust_signals.filter(
+          (value): value is string => typeof value === "string" && value.length > 0,
+        )
+      : [],
+  };
+}
+
 export async function GET(request: Request) {
   const startedAt = Date.now();
   const rid = requestId();
@@ -357,6 +420,7 @@ export async function GET(request: Request) {
       glow_score: number;
       tags: TagRecord;
       claim?: ClaimRecord;
+      profile?: ProfileRecord;
     }> = await resp.json();
 
     const merchants = places
@@ -388,6 +452,7 @@ export async function GET(request: Request) {
               ? p.glow_score
               : 0,
           claim: sanitizeClaim(p.claim ?? null),
+          profile: sanitizeProfile(p.profile ?? null),
         };
       })
       .filter(Boolean);
