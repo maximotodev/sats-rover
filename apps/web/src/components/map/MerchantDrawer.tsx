@@ -68,6 +68,7 @@ type DrawerMode =
   | "error";
 
 type FailedBroadcastMap = Record<string, string>;
+type ClaimSubmitState = "idle" | "submitting" | "submitted" | "failed";
 
 function tagTruthy(v: unknown): boolean {
   if (v === true) return true;
@@ -262,7 +263,7 @@ export default function MerchantDrawer({
 }: MerchantDrawerProps) {
   const identity = useIdentity();
   const { session, ndk } = identity;
-  const { publishSignal } = identity.actions;
+  const { publishSignal, publishClaim } = identity.actions;
   const transmitSignalFlow = useTransmitSignalFlow();
   const gates = useFlowGates();
 
@@ -299,6 +300,9 @@ export default function MerchantDrawer({
   const [visibleCount, setVisibleCount] = useState(30);
   const [copiedHint, setCopiedHint] = useState<string | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [claimSubmitState, setClaimSubmitState] =
+    useState<ClaimSubmitState>("idle");
+  const [claimSubmitError, setClaimSubmitError] = useState<string | null>(null);
 
   const pollRunIdRef = useRef(0);
   const copiedHintTimerRef = useRef<number | null>(null);
@@ -329,6 +333,8 @@ export default function MerchantDrawer({
     setVisibleCount(30);
     setCopiedHint(null);
     setAdvancedOpen(false);
+    setClaimSubmitState("idle");
+    setClaimSubmitError(null);
   }, [placeId]);
 
   useEffect(() => {
@@ -370,8 +376,12 @@ export default function MerchantDrawer({
   const hasOnchain =
     tagTruthy(merchant?.tags?.["currency:XBT"]) ||
     tagTruthy(merchant?.tags?.["payment:onchain"]);
+  const merchantClaim = merchant?.claim ?? null;
+  const merchantClaimed = merchantClaim?.claimed === true;
+  const merchantProfile = merchant?.profile ?? null;
 
-  const reliability = placeFeed.confidenceScore / 100;
+  const reliability =
+    (merchantProfile?.confidenceScore ?? placeFeed.confidenceScore) / 100;
 
   const feedItems = placeFeed.items;
   const visibleItems = useMemo(
@@ -385,15 +395,10 @@ export default function MerchantDrawer({
     const first = feedItems.find((item) => item.status === "success");
     return first ? first.createdAtMs : null;
   }, [feedItems]);
-
-  const successStreak = useMemo(() => {
-    let streak = 0;
-    for (const item of feedItems) {
-      if (item.status === "success") streak += 1;
-      else break;
-    }
-    return streak;
-  }, [feedItems]);
+  const displayedLastConfirmedAt =
+    merchantProfile?.lastConfirmedAt != null
+      ? merchantProfile.lastConfirmedAt * 1000
+      : lastConfirmedAt;
 
   const latestEventId = feedItems[0]?.id || activeCheckinId || "";
 
@@ -447,6 +452,34 @@ export default function MerchantDrawer({
     }
     setComposerStep("broadcast");
     setComposerOpen(true);
+  };
+
+  const handlePublishClaim = async () => {
+    if (!merchant) return;
+    if (!session.pubkey) {
+      gates.openForAction({
+        kind: "need_identity",
+        reason: "missing_identity",
+      });
+      return;
+    }
+
+    setClaimSubmitState("submitting");
+    setClaimSubmitError(null);
+
+    try {
+      const result = await publishClaim(merchant.id);
+      if (!result.ok || !result.eventId) {
+        setClaimSubmitState("failed");
+        setClaimSubmitError("Claim publish failed. You can retry.");
+        return;
+      }
+
+      setClaimSubmitState("submitted");
+    } catch {
+      setClaimSubmitState("failed");
+      setClaimSubmitError("Claim publish failed. You can retry.");
+    }
   };
 
   const pollCheckinStatus = async (
@@ -893,6 +926,79 @@ export default function MerchantDrawer({
                 </div>
               </div>
 
+              <div className="mt-4 rounded-xl border border-white/10 bg-black/35 p-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-[11px] uppercase tracking-[0.18em] text-gray-500">
+                      Place Profile
+                    </p>
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      <span
+                        className={cn(
+                          "inline-flex items-center rounded-full border px-2 py-1 text-[11px] font-semibold",
+                          merchantClaimed
+                            ? "border-[#00FF41]/35 bg-[#00FF41]/10 text-[#00FF41]"
+                            : "border-white/15 bg-white/5 text-gray-200",
+                        )}
+                      >
+                        {merchantClaim?.claimed ? "Claimed" : "Unclaimed"}
+                      </span>
+                      <span className="inline-flex items-center rounded-full border border-white/15 bg-white/5 px-2 py-1 text-[11px] text-gray-200">
+                        {merchantProfile?.freshnessLabel || "Quiet recently"}
+                      </span>
+                      <span className="inline-flex items-center rounded-full border border-[#F7931A]/30 bg-[#F7931A]/10 px-2 py-1 text-[11px] text-[#F7B267]">
+                        {merchantProfile?.confidenceLabel || "Low confidence"}
+                      </span>
+                    </div>
+                    {merchantClaim?.claimed && merchantClaim?.claimantPubkey && (
+                      <p className="mt-2 text-[11px] text-gray-400">
+                        Latest claim published by{" "}
+                        <span className="font-mono text-gray-300">
+                          {shortHex(merchantClaim.claimantPubkey)}
+                        </span>
+                      </p>
+                    )}
+                    {merchantProfile?.trustSignals &&
+                      merchantProfile.trustSignals.length > 0 && (
+                        <div className="mt-2 flex flex-wrap gap-1.5">
+                          {merchantProfile.trustSignals.map((signal) => (
+                            <span
+                              key={signal}
+                              className="inline-flex items-center rounded-full border border-white/10 bg-black/25 px-2 py-1 text-[10px] text-gray-300"
+                            >
+                              {signal}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    <p className="mt-2 text-[11px] text-gray-500">
+                      Derived from canonical read state only. Not verified ownership.
+                    </p>
+                    {claimSubmitState === "submitted" && (
+                      <p className="mt-2 text-[11px] text-[#F7B267]">
+                        Claim submitted. Awaiting canonical visibility.
+                      </p>
+                    )}
+                    {claimSubmitError && (
+                      <p className="mt-2 text-[11px] text-red-300">
+                        {claimSubmitError}
+                      </p>
+                    )}
+                  </div>
+
+                  <button
+                    onClick={() => void handlePublishClaim()}
+                    disabled={claimSubmitState === "submitting"}
+                    className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-white/15 bg-white/5 px-3 py-2 text-[11px] font-semibold text-gray-200 hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    <KeyRound className="h-3.5 w-3.5" />
+                    {claimSubmitState === "submitting"
+                      ? "Submitting claim..."
+                      : "Publish claim"}
+                  </button>
+                </div>
+              </div>
+
               {showTopWorkflowAction && (
                 <div className="mt-4 grid grid-cols-2 gap-2">
                   <button
@@ -922,27 +1028,29 @@ export default function MerchantDrawer({
 
               <div className="mt-3 grid grid-cols-2 gap-3 rounded-xl border border-white/10 bg-black/35 p-3 text-[11px] sm:grid-cols-4">
                 <div>
-                  <p className="text-gray-500">Total signals</p>
+                  <p className="text-gray-500">Recent signals</p>
                   <p className="mt-1 font-semibold text-gray-100">
-                    {totalSignals}
+                    {merchantProfile?.recentSignals ?? totalSignals}
                   </p>
                 </div>
                 <div>
-                  <p className="text-gray-500">Success count</p>
+                  <p className="text-gray-500">Recent successes</p>
                   <p className="mt-1 font-semibold text-[#00FF41]">
-                    {successSignals}
+                    {merchantProfile?.recentSuccesses ?? successSignals}
                   </p>
                 </div>
                 <div>
-                  <p className="text-gray-500">Current streak</p>
+                  <p className="text-gray-500">Confidence</p>
                   <p className="mt-1 font-semibold text-[#F7931A]">
-                    {successStreak}
+                    {Math.round((merchantProfile?.confidenceScore ?? placeFeed.confidenceScore) || 0)}%
                   </p>
                 </div>
                 <div>
                   <p className="text-gray-500">Last confirmed</p>
                   <p className="mt-1 font-semibold text-gray-100">
-                    {lastConfirmedAt ? formatRelative(lastConfirmedAt) : "n/a"}
+                    {displayedLastConfirmedAt
+                      ? formatRelative(displayedLastConfirmedAt)
+                      : "n/a"}
                   </p>
                 </div>
               </div>
