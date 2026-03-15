@@ -11,6 +11,12 @@ import { getNDK } from "@/lib/ndk";
 import { storeNsec, loadNsec, clearNsec } from "@/lib/storage";
 import { hydrateUserProfile } from "@/lib/session-hydration";
 import { resolveCanonicalCheckinEventId } from "@/flows/checkin-correlation";
+import {
+  buildCheckinPublishStartTelemetry,
+  buildCheckinPublishSummaryTelemetry,
+  summarizeRelayPublishError,
+  summarizeRelayPublishSuccess,
+} from "@/flows/checkin-publish-telemetry";
 import { buildCheckinSignalTags } from "@/flows/signal-tags";
 
 /**
@@ -181,12 +187,15 @@ export function useNostr() {
       try {
         const provisionalEventId =
           typeof event.id === "string" ? event.id : null;
-        console.info("checkin_publish_start", {
-          provisional_event_id: provisionalEventId,
-          pubkey: session.pubkey || null,
-          place_id: merchantId,
-          status: paymentStatus,
-        });
+        console.info(
+          "checkin_publish_start",
+          buildCheckinPublishStartTelemetry({
+            provisionalEventId,
+            pubkey: session.pubkey || null,
+            placeId: merchantId,
+            status: paymentStatus,
+          }),
+        );
         await event.sign();
         const signedEventId =
           typeof event.id === "string" && event.id ? event.id : null;
@@ -196,12 +205,16 @@ export function useNostr() {
           signedEventId,
           publishedEventId: typeof event.id === "string" ? event.id : null,
         });
-        console.info("checkin_publish_complete", {
-          event_id: canonicalEventId,
-          pubkey: session.pubkey || null,
-          place_id: merchantId,
-          status: paymentStatus,
-        });
+        console.info(
+          "checkin_publish_summary",
+          buildCheckinPublishSummaryTelemetry({
+            eventId: canonicalEventId,
+            pubkey: session.pubkey || null,
+            placeId: merchantId,
+            status: paymentStatus,
+            relayOutcome: summarizeRelayPublishSuccess(relays),
+          }),
+        );
         return {
           ok: relays.size > 0,
           eventId: canonicalEventId,
@@ -216,7 +229,18 @@ export function useNostr() {
           },
         };
       } catch (e) {
-        console.error("Signal broadcast failed", e);
+        const signedOrPublishedEventId =
+          typeof event.id === "string" && event.id ? event.id : null;
+        console.error(
+          "checkin_publish_summary",
+          buildCheckinPublishSummaryTelemetry({
+            eventId: signedOrPublishedEventId,
+            pubkey: session.pubkey || null,
+            placeId: merchantId,
+            status: paymentStatus,
+            relayOutcome: summarizeRelayPublishError(e),
+          }),
+        );
         return { ok: false };
       }
     },
