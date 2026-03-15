@@ -17,7 +17,10 @@ import {
   summarizeRelayPublishError,
   summarizeRelayPublishSuccess,
 } from "@/flows/checkin-publish-telemetry";
-import { buildCheckinSignalTags } from "@/flows/signal-tags";
+import {
+  buildCheckinSignalTags,
+  buildMerchantClaimTags,
+} from "@/flows/signal-tags";
 
 /**
  * Existing runtime kinds used by the current v2 check-in flow.
@@ -25,7 +28,7 @@ import { buildCheckinSignalTags } from "@/flows/signal-tags";
  * not a renumbering of Nostr event kinds.
  */
 const KIND_SIGNAL = 30331;
-const KIND_CLAIM = 30333;
+const KIND_CLAIM = 30078;
 
 /**
  * BROWSER-NATIVE HELPERS
@@ -276,8 +279,9 @@ export function useNostr() {
   );
 
   /**
-   * Merchant claim publish path (existing Kind 30333 runtime behavior).
-   * This comment is intentionally descriptive only; the runtime claim flow is unchanged.
+   * Merchant claim publish path for the v2 app-state claims lane.
+   * Local publish success is not canonical claim truth; the claim becomes
+   * user-visible only after indexer/backend read surfaces observe it.
    */
   const publishClaim = useCallback(
     async (merchantId: string) => {
@@ -285,14 +289,15 @@ export function useNostr() {
 
       const event = new NDKEvent(ndk);
       event.kind = KIND_CLAIM;
-      event.content = `Claiming ownership of ${merchantId}`;
-      event.tags = [
-        ["place", merchantId],
-        ["role", "owner"],
-        ["v", "2"],
-      ];
+      event.content = JSON.stringify({});
+      event.tags = buildMerchantClaimTags(merchantId);
+      await event.sign();
+      const relays = await event.publish();
 
-      return (await event.publish()).size > 0;
+      return {
+        ok: relays.size > 0,
+        eventId: typeof event.id === "string" && event.id ? event.id : null,
+      };
     },
     [ndk, session],
   );

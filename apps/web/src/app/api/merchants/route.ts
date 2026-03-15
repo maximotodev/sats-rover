@@ -64,6 +64,12 @@ const TAG_ALLOWLIST_PREFIXES = [
 
 type SmallValue = string | number | boolean | null;
 type TagRecord = Record<string, unknown>;
+type ClaimRecord = {
+  claimed: boolean;
+  claimant_pubkey?: string | null;
+  claim_event_id?: string | null;
+  claim_created_at?: number | null;
+} | null;
 type Source = "sr" | "btcmap" | "osm";
 type AppErrorKind =
   | "CONFIG_ERROR"
@@ -297,6 +303,30 @@ function toSource(value: unknown): Source {
     : "btcmap";
 }
 
+function sanitizeClaim(raw: ClaimRecord) {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+
+  const claimed = raw.claimed === true;
+  if (!claimed) {
+    return { claimed: false };
+  }
+
+  return {
+    claimed: true,
+    claimantPubkey:
+      typeof raw.claimant_pubkey === "string" ? raw.claimant_pubkey : null,
+    claimEventId:
+      typeof raw.claim_event_id === "string" ? raw.claim_event_id : null,
+    claimCreatedAt:
+      typeof raw.claim_created_at === "number" &&
+      Number.isFinite(raw.claim_created_at)
+        ? raw.claim_created_at
+        : null,
+  };
+}
+
 export async function GET(request: Request) {
   const startedAt = Date.now();
   const rid = requestId();
@@ -326,6 +356,7 @@ export async function GET(request: Request) {
       source: string;
       glow_score: number;
       tags: TagRecord;
+      claim?: ClaimRecord;
     }> = await resp.json();
 
     const merchants = places
@@ -356,6 +387,7 @@ export async function GET(request: Request) {
             typeof p.glow_score === "number" && Number.isFinite(p.glow_score)
               ? p.glow_score
               : 0,
+          claim: sanitizeClaim(p.claim ?? null),
         };
       })
       .filter(Boolean);

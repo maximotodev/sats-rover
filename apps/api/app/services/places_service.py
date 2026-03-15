@@ -6,15 +6,16 @@ import json
 import logging
 import os
 from dataclasses import dataclass
+from typing import Any, Mapping
 
 from geoalchemy2 import Geometry
 from geoalchemy2.functions import ST_X, ST_Y
-from sqlalchemy import cast, func, select
+from sqlalchemy import cast, column, func, select, table
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.settings import settings
 from app.models.place import Place
-from app.schemas.place import PlaceOut
+from app.schemas.place import PlaceClaimSummaryOut, PlaceOut
 from app.services.redis_client import redis_client
 
 logger = logging.getLogger(__name__)
@@ -75,6 +76,36 @@ def bbox_cache_key(bbox: BBox) -> str:
     return f"places:bbox:{digest}"
 
 
+def build_place_claim_summary(row: Mapping[str, Any]) -> PlaceClaimSummaryOut:
+    claim_event_id = row.get("claim_event_id")
+    claimant_pubkey = row.get("claimant_pubkey")
+    claim_created_at = row.get("claim_created_at")
+    if not isinstance(claim_event_id, str) or not claim_event_id:
+        return PlaceClaimSummaryOut(claimed=False)
+
+    return PlaceClaimSummaryOut(
+        claimed=True,
+        claimant_pubkey=claimant_pubkey if isinstance(claimant_pubkey, str) else None,
+        claim_event_id=claim_event_id,
+        claim_created_at=int(claim_created_at) if isinstance(claim_created_at, int) else None,
+    )
+
+
+def build_place_out(row: Mapping[str, Any]) -> PlaceOut:
+    return PlaceOut.model_validate(
+        {
+            "id": row.get("id"),
+            "name": row.get("name"),
+            "source": row.get("source"),
+            "tags": row.get("tags"),
+            "glow_score": row.get("glow_score"),
+            "lat": row.get("lat"),
+            "lon": row.get("lon"),
+            "claim": build_place_claim_summary(row),
+        }
+    )
+
+
 async def list_places_by_bbox(db: AsyncSession, bbox: BBox, limit: int = 600) -> list[PlaceOut]:
     key = bbox_cache_key(bbox)
 
@@ -94,6 +125,38 @@ async def list_places_by_bbox(db: AsyncSession, bbox: BBox, limit: int = 600) ->
 
     envelope = func.ST_MakeEnvelope(bbox.west, bbox.south, bbox.east, bbox.north, 4326)
     geom = cast(Place.location, Geometry(geometry_type="POINT", srid=4326))
+    claims = table(
+        "app_state_claims",
+        column("pubkey"),
+        column("place_id"),
+        column("role"),
+        column("created_at"),
+        column("event_id"),
+    )
+    latest_claim_pubkey = (
+        select(claims.c.pubkey)
+        .where(claims.c.place_id == Place.id)
+        .where(claims.c.role == "owner")
+        .order_by(claims.c.created_at.desc(), claims.c.event_id.desc())
+        .limit(1)
+        .scalar_subquery()
+    )
+    latest_claim_event_id = (
+        select(claims.c.event_id)
+        .where(claims.c.place_id == Place.id)
+        .where(claims.c.role == "owner")
+        .order_by(claims.c.created_at.desc(), claims.c.event_id.desc())
+        .limit(1)
+        .scalar_subquery()
+    )
+    latest_claim_created_at = (
+        select(claims.c.created_at)
+        .where(claims.c.place_id == Place.id)
+        .where(claims.c.role == "owner")
+        .order_by(claims.c.created_at.desc(), claims.c.event_id.desc())
+        .limit(1)
+        .scalar_subquery()
+    )
 
     query = (
         select(
@@ -104,6 +167,9 @@ async def list_places_by_bbox(db: AsyncSession, bbox: BBox, limit: int = 600) ->
             Place.glow_score.label("glow_score"),
             ST_Y(geom).label("lat"),
             ST_X(geom).label("lon"),
+            latest_claim_pubkey.label("claimant_pubkey"),
+            latest_claim_event_id.label("claim_event_id"),
+            latest_claim_created_at.label("claim_created_at"),
         )
         .where(func.ST_Intersects(geom, envelope))
         .order_by(Place.glow_score.desc())
@@ -112,7 +178,7 @@ async def list_places_by_bbox(db: AsyncSession, bbox: BBox, limit: int = 600) ->
 
     result = await db.execute(query)
     rows = result.mappings().all()
-    out = [PlaceOut.model_validate(r) for r in rows]
+    out = [build_place_out(r) for r in rows]
 
     await redis_client.setex(
         key,

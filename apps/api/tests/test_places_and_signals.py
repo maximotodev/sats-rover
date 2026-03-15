@@ -6,7 +6,11 @@ from pydantic import ValidationError
 from sqlalchemy.exc import DBAPIError
 
 from app.schemas.signal import CheckinConfirmIn, PlaceFeedOut
-from app.services.places_service import parse_bbox
+from app.services.places_service import (
+    build_place_claim_summary,
+    build_place_out,
+    parse_bbox,
+)
 from app.services.signals_service import (
     _persist_v2_event_metadata,
     confirm_checkin,
@@ -41,6 +45,42 @@ class PlacesAndSignalsTests(unittest.TestCase):
     def test_checkin_confirm_validates_hex(self):
         with self.assertRaises(ValidationError):
             CheckinConfirmIn(event_id="not-hex", place_id="btcmap:abc", pubkey="f" * 64)
+
+    def test_build_place_claim_summary_defaults_unclaimed(self):
+        summary = build_place_claim_summary({})
+        self.assertFalse(summary.claimed)
+        self.assertIsNone(summary.claim_event_id)
+
+    def test_build_place_claim_summary_surfaces_claim_fields(self):
+        summary = build_place_claim_summary(
+            {
+                "claim_event_id": "a" * 64,
+                "claimant_pubkey": "b" * 64,
+                "claim_created_at": 1_710_000_000,
+            }
+        )
+        self.assertTrue(summary.claimed)
+        self.assertEqual(summary.claim_event_id, "a" * 64)
+        self.assertEqual(summary.claimant_pubkey, "b" * 64)
+        self.assertEqual(summary.claim_created_at, 1_710_000_000)
+
+    def test_build_place_out_includes_claim_summary(self):
+        place = build_place_out(
+            {
+                "id": "btcmap:abc",
+                "name": "Cafe",
+                "source": "btcmap",
+                "tags": {},
+                "glow_score": 0.42,
+                "lat": 13.7,
+                "lon": -89.2,
+                "claim_event_id": "c" * 64,
+                "claimant_pubkey": "d" * 64,
+                "claim_created_at": 1_710_000_001,
+            }
+        )
+        self.assertTrue(place.claim.claimed)
+        self.assertEqual(place.claim.claim_event_id, "c" * 64)
 
 
 class _MappingsResult:

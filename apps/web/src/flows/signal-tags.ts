@@ -12,3 +12,15 @@ export function buildCheckinSignalTags(
     ["client", "satsrover-web"],
   ];
 }
+
+export function buildMerchantClaimTags(placeId: string): string[][] {
+  return [
+    ["t", "satsrover-claim"],
+    ["t", "satsrover"],
+    ["v", "2"],
+    ["d", `claim:${placeId}`],
+    ["place", placeId],
+    ["role", "owner"],
+    ["client", "satsrover-web"],
+  ];
+}
