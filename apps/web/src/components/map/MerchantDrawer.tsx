@@ -30,6 +30,7 @@ import {
   buildCheckinStatusParams,
   evaluateConfirmResponseForPolling,
 } from "@/flows/checkin-correlation";
+import { buildCheckinPublishSummaryTelemetry } from "@/flows/checkin-publish-telemetry";
 import { NDKUserProfile } from "@nostr-dev-kit/ndk";
 import { buildAuthHeaders, randomNonce } from "@/lib/authProof";
 import IdentityGateModal from "@/components/modals/IdentityGateModal";
@@ -477,6 +478,13 @@ export default function MerchantDrawer({
         const reason = (data?.reason_code as string | null | undefined) ?? null;
 
         if (status === "ok" || status === "failed" || status === "not_found") {
+          console.info("checkin_canonical_confirmation", {
+            event_id: checkinId,
+            pubkey,
+            place_id: placeId,
+            canonical_confirmation_status: status,
+            reason_code: reason,
+          });
           setCheckinStatus(status);
           setCheckinReason(reason);
           if (status === "ok") {
@@ -500,6 +508,13 @@ export default function MerchantDrawer({
     }
 
     if (pollRunIdRef.current === runId) {
+      console.error("checkin_canonical_confirmation", {
+        event_id: checkinId,
+        pubkey,
+        place_id: placeId,
+        canonical_confirmation_status: "failed",
+        reason_code: "status_timeout",
+      });
       setCheckinStatus("failed");
       setCheckinReason("status_timeout");
     }
@@ -691,6 +706,17 @@ export default function MerchantDrawer({
         responseEventId: confirmEventId,
       });
       if (confirmDecision.next === "failed") {
+        console.error(
+          "checkin_publish_summary",
+          buildCheckinPublishSummaryTelemetry({
+            eventId,
+            pubkey: actorPubkey,
+            placeId: merchant.id,
+            status: submissionStatus,
+            relayOutcome: { relayResult: "success" },
+            backendConfirmStatus: "failed",
+          }),
+        );
         setCheckinStatus("failed");
         setCheckinReason(confirmDecision.reasonCode);
         setPublishError(
@@ -700,6 +726,17 @@ export default function MerchantDrawer({
         return;
       }
       if (confirmDecision.next === "ok") {
+        console.info(
+          "checkin_publish_summary",
+          buildCheckinPublishSummaryTelemetry({
+            eventId,
+            pubkey: actorPubkey,
+            placeId: merchant.id,
+            status: submissionStatus,
+            relayOutcome: { relayResult: "success" },
+            backendConfirmStatus: "ok",
+          }),
+        );
         setCheckinStatus("ok");
         setCheckinReason(confirmDecision.reasonCode);
         setComposerOpen(false);
@@ -710,6 +747,17 @@ export default function MerchantDrawer({
         return;
       }
     } catch {
+      console.error(
+        "checkin_publish_summary",
+        buildCheckinPublishSummaryTelemetry({
+          eventId,
+          pubkey: actorPubkey,
+          placeId: merchant.id,
+          status: submissionStatus,
+          relayOutcome: { relayResult: "success" },
+          backendConfirmStatus: "failed",
+        }),
+      );
       setCheckinStatus("failed");
       setCheckinReason("confirm_request_failed");
       setPublishError("Confirm request failed before durable handoff.");
@@ -719,6 +767,17 @@ export default function MerchantDrawer({
 
     setCheckinStatus("pending");
     setCheckinReason("indexing_delay");
+    console.info(
+      "checkin_publish_summary",
+      buildCheckinPublishSummaryTelemetry({
+        eventId,
+        pubkey: actorPubkey,
+        placeId: merchant.id,
+        status: submissionStatus,
+        relayOutcome: { relayResult: "success" },
+        backendConfirmStatus: "pending",
+      }),
+    );
     await pollCheckinStatus(eventId, actorPubkey, merchant.id);
 
     setIsPublishing(false);

@@ -17,7 +17,7 @@ export function getNDK(): NDK {
     // Fire-and-forget: NDK handles internal reconnection logic
     ndkInstance
       .connect()
-      .catch((e) => console.error("[NDK] Connection error", e));
+      .catch((e) => console.info("[NDK] Initial relay connection incomplete", e));
   }
   return ndkInstance;
 }
