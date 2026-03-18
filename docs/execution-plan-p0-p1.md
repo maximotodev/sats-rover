@@ -32,6 +32,7 @@ This plan will produce a branchable path to: make protocol authority explicit, m
 - [confirmed] [apps/api/app/main.py](/home/maximoto/dev/sats-rover/apps/api/app/main.py) debug routes also fall back from `signals_v2_events` to `signals` in `/debug/counts`, and expose mixed canonical / legacy / Redis diagnostics in `/debug/checkins/{event_id}`.
 - [confirmed] [apps/indexer/src/importer.ts](/home/maximoto/dev/sats-rover/apps/indexer/src/importer.ts) still writes to legacy `signals`, normalizes legacy digits-only `place` tags to canonical ids, and updates `checkin_submissions` as confirmed only after observing the v2 ledger.
 - [confirmed] [apps/indexer/src/signals_v2_state.ts](/home/maximoto/dev/sats-rover/apps/indexer/src/signals_v2_state.ts) defines deterministic reducer semantics for `signals_v2_state`: key `(pubkey, place_id, day_utc)`, keep newest by `created_at`, tie-break by `event_id`.
+- [confirmed] [apps/indexer/src/index.ts](/home/maximoto/dev/sats-rover/apps/indexer/src/index.ts) validates `30078` claim-lane events with `validateClaimsEventStrict`, then reduces them via `reduceClaimEvent` into `app_state_claims` keyed by `(pubkey, d)` with `created_at` and `event_id` tie-break semantics.
 - [confirmed] [apps/api/app/services/places_service.py](/home/maximoto/dev/sats-rover/apps/api/app/services/places_service.py) derives place-profile fields directly from `signals_v2_state` and `app_state_claims`, but its response schema [apps/api/app/schemas/place.py](/home/maximoto/dev/sats-rover/apps/api/app/schemas/place.py) contains no explicit provenance/completeness fields.
 - [confirmed] [apps/api/app/services/signals_service.py](/home/maximoto/dev/sats-rover/apps/api/app/services/signals_service.py) uses canonical ledger checks for confirmation, but also returns pending/duplicate/not-found workflow semantics derived from `checkin_submissions` and Redis.
 - [confirmed] [apps/api/app/api/v1/checkins.py](/home/maximoto/dev/sats-rover/apps/api/app/api/v1/checkins.py) exposes `/v1/checkins/intent`, `/v1/checkins/confirm`, `/v1/checkins/status`, and `/v1/checkins/{checkin_id}`.
@@ -45,15 +46,66 @@ This plan will produce a branchable path to: make protocol authority explicit, m
 
 - [inference] The de facto normative protocol source is currently [docs/protocol/satsrover-v2.json](/home/maximoto/dev/sats-rover/docs/protocol/satsrover-v2.json), but runtime validation truth is partially duplicated in [apps/indexer/src/index.ts](/home/maximoto/dev/sats-rover/apps/indexer/src/index.ts) and [apps/indexer/src/live_signal_policy.ts](/home/maximoto/dev/sats-rover/apps/indexer/src/live_signal_policy.ts). This is a stable inference because the docs explicitly mark [packages/protocol/src/index.ts](/home/maximoto/dev/sats-rover/packages/protocol/src/index.ts) as stale and runtime uses hard-coded v2 constants elsewhere.
 - [inference] `app_state_claims`, `signals_v2_events`, and `signals_v2_state` are canonical or derived load-bearing schema despite not being migration-owned, because the API and web read paths assume they exist and tests target them directly.
+- [inference] `app_state_claims` is best classified as replayable reducer-owned current-state output for the claim lane, not operator-local convenience state, because current runtime code only writes it from validated `30078` claim events and applies deterministic replaceable-key selection; this remains an inference rather than a confirmed fact because the repo does not yet contain a dedicated claim-lane rebuild path or claim-lane conformance test equivalent to [apps/indexer/src/rebuild_signals_v2_state.ts](/home/maximoto/dev/sats-rover/apps/indexer/src/rebuild_signals_v2_state.ts).
 - [inference] The legacy `signals` table remains hot-path compatibility residue rather than dead code, because both API services and [apps/indexer/src/importer.ts](/home/maximoto/dev/sats-rover/apps/indexer/src/importer.ts) still reference it and tests explicitly cover missing-relation fallback behavior.
 - [inference] Route semantics are not yet class-disciplined: `/v1/checkins/status` is operator-local workflow state that performs canonical observation internally, while `/v1/places/{place_id}/feed` is a derived route that may silently fall back to legacy reads.
 
 ## Recommendations
 
-- [recommendation] Treat [docs/protocol/satsrover-v2.json](/home/maximoto/dev/sats-rover/docs/protocol/satsrover-v2.json) as the single normative protocol authority in P0, then either generate or explicitly derive any runtime constants from that authority in a later branch.
-- [recommendation] Move ownership of `signals_v2_events`, `signals_v2_state`, `app_state_claims`, and final `ingestion_state` shape under Alembic in P0, then convert indexer startup from bootstrap creation to startup assertions only.
-- [recommendation] Classify and quarantine legacy compatibility residue rather than deleting it blindly: `signals`, `merchant_claims`, [apps/indexer/src/importer.ts](/home/maximoto/dev/sats-rover/apps/indexer/src/importer.ts), and v1 fallback logic all need an explicit disposition.
-- [recommendation] In P1, make every important route explicitly one of Observation, Derived, or Operator-local, and add provenance/completeness semantics to derived payloads before expanding product behavior.
+- [recommendation][confirmed from repo] Treat [docs/protocol/satsrover-v2.json](/home/maximoto/dev/sats-rover/docs/protocol/satsrover-v2.json) as the single normative protocol authority in P0, then either generate or explicitly derive any runtime constants from that authority in a later branch.
+- [recommendation][confirmed from repo] Move ownership of `signals_v2_events`, `signals_v2_state`, `app_state_claims`, and final `ingestion_state` shape under Alembic in P0, then convert indexer startup from bootstrap creation to startup assertions only.
+- [recommendation][confirmed from repo] Classify and quarantine legacy compatibility residue rather than deleting it blindly: `signals`, `merchant_claims`, [apps/indexer/src/importer.ts](/home/maximoto/dev/sats-rover/apps/indexer/src/importer.ts), and v1 fallback logic all need an explicit disposition.
+- [recommendation][confirmed from repo] Any retained compatibility fallback must be labeled degraded mode and must not present itself as canonical input truth or full derived truth.
+- [recommendation][confirmed from repo] In P1, make every important route explicitly one of Observation, Derived, or Operator-local, and add provenance/completeness semantics to derived payloads before expanding product behavior.
+
+## Protocol constant inventory
+
+### Confirmed repo facts
+
+| Exact Path | Layer / Owner Boundary | Constant / Semantic Surface | Current Value / Assumption | Canonical Source It Should Trace To | Verification Status | Risk If Wrong | Recommended Disposition |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| [docs/protocol/satsrover-v2.json](/home/maximoto/dev/sats-rover/docs/protocol/satsrover-v2.json) | protocol | Normative event kinds and lane semantics | `30331` history signals; `30078` app-state claims/profiles | self | confirmed from repo | Critical | keep as sole normative authority |
+| [docs/protocol/satsrover-v2.json](/home/maximoto/dev/sats-rover/docs/protocol/satsrover-v2.json) | protocol | Normative required tag names and values | `t=satsrover`, `v=2`, `place`, `status` for `30331`; claim lane uses `t=satsrover-claim`, `d=claim:<place_id>`, `role=owner` | self | confirmed from repo | Critical | keep as sole normative authority |
+| [docs/protocol/satsrover-v2.json](/home/maximoto/dev/sats-rover/docs/protocol/satsrover-v2.json) | protocol | Normative optional tags | `g`, `client`, `amount_msat`, `zap`, `bolt11`; claim lane optional `method`, `expires`, `client` | self | confirmed from repo | High | keep as sole normative authority |
+| [packages/protocol/src/index.ts](/home/maximoto/dev/sats-rover/packages/protocol/src/index.ts) | protocol | Legacy exported protocol constants | `VERSION: "1"`, `CLAIM: 30333`, `REVOKE: 30334`, `PLACE: "p"`, `STATUS: "s"` | [docs/protocol/satsrover-v2.json](/home/maximoto/dev/sats-rover/docs/protocol/satsrover-v2.json) | confirmed from repo | Critical | quarantine as stale residue; do not treat as authority |
+| [apps/indexer/src/live_signal_policy.ts](/home/maximoto/dev/sats-rover/apps/indexer/src/live_signal_policy.ts) | reducer/indexer | Live subscription filter for signals lane | `kinds:[30331]`, `#t:["satsrover"]`, `#v:["2"]` | [docs/protocol/satsrover-v2.json](/home/maximoto/dev/sats-rover/docs/protocol/satsrover-v2.json) `req_filters.indexer.sr_live` | confirmed from repo | High | trace explicitly to normative spec; keep runtime site minimal |
+| [apps/indexer/src/index.ts](/home/maximoto/dev/sats-rover/apps/indexer/src/index.ts) | reducer/indexer | Claim subscription filter | `kinds:[30078]`, `#t:["satsrover-claim"]`, `#v:["2"]` | [docs/protocol/satsrover-v2.json](/home/maximoto/dev/sats-rover/docs/protocol/satsrover-v2.json) `req_filters.indexer.sr_claims` | confirmed from repo | High | trace explicitly to normative spec |
+| [apps/indexer/src/index.ts](/home/maximoto/dev/sats-rover/apps/indexer/src/index.ts) | reducer/indexer | Hard-coded event kind constants | `CLAIMS_KIND = 30078`, `SIGNALS_KIND = 30331` | [docs/protocol/satsrover-v2.json](/home/maximoto/dev/sats-rover/docs/protocol/satsrover-v2.json) | confirmed from repo | High | later derive or generate from normative spec |
+| [apps/indexer/src/index.ts](/home/maximoto/dev/sats-rover/apps/indexer/src/index.ts) | reducer/indexer | Validator assumptions for signal lane required tags | `t=satsrover`, `v=2`, exactly one `place`, exactly one `status`, status in `success|failed|did_not_try` | [docs/protocol/satsrover-v2.json](/home/maximoto/dev/sats-rover/docs/protocol/satsrover-v2.json) `event_model.kinds.30331` and `validation` | confirmed from repo | Critical | retain but explicitly trace to normative spec |
+| [apps/indexer/src/index.ts](/home/maximoto/dev/sats-rover/apps/indexer/src/index.ts) | reducer/indexer | Validator assumptions for optional signal tags | `g` geohash 5-7, `amount_msat` digits-only, `zap` hex64, `bolt11` <= 2000 chars, duplicates rejected | [docs/protocol/satsrover-v2.json](/home/maximoto/dev/sats-rover/docs/protocol/satsrover-v2.json) `validation` and `bitcoin_rules` | confirmed from repo | High | retain but explicitly trace to normative spec |
+| [apps/indexer/src/index.ts](/home/maximoto/dev/sats-rover/apps/indexer/src/index.ts) | reducer/indexer | Validator assumptions for claim lane | `t=satsrover-claim`, `v=2`, `d=claim:<place_id>`, `place`, `role=owner`, duplicate required tags rejected | [docs/protocol/satsrover-v2.json](/home/maximoto/dev/sats-rover/docs/protocol/satsrover-v2.json) `event_model.kinds.30078.subtypes.claim` | confirmed from repo | Critical | retain but explicitly trace to normative spec |
+| [apps/indexer/src/index.ts](/home/maximoto/dev/sats-rover/apps/indexer/src/index.ts) | reducer/indexer | Parser/validator scan limits and guardrails | `VERIFICATION_TAG_SCAN_LIMIT=64`, `MAX_TAG_FIELD_LENGTH=200`, content byte limits, time skew bounds | [docs/protocol/satsrover-v2.json](/home/maximoto/dev/sats-rover/docs/protocol/satsrover-v2.json) `validation.global_limits` | confirmed from repo | Medium | document as runtime enforcement that should trace to normative spec |
+| [apps/indexer/src/signals_v2_state.ts](/home/maximoto/dev/sats-rover/apps/indexer/src/signals_v2_state.ts) | reducer/indexer | Signal-lane current-state selection rule | key `(pubkey, placeId, dayUtc)`; keep newest by `createdAt`; tie-break by lexicographically larger `eventId` | [docs/protocol/satsrover-v2.json](/home/maximoto/dev/sats-rover/docs/protocol/satsrover-v2.json) `indexer_reducer.lane_history_30331.outputs[1]` | confirmed from repo | High | keep as runtime reducer rule; add conformance coverage |
+| [apps/indexer/src/index.ts](/home/maximoto/dev/sats-rover/apps/indexer/src/index.ts) | reducer/indexer | Claim-lane current-state selection rule | key `(pubkey, d)`; update only if `created_at` increases or same-time `event_id` increases | [docs/protocol/satsrover-v2.json](/home/maximoto/dev/sats-rover/docs/protocol/satsrover-v2.json) `indexer_reducer.lane_state_30078.keying` | confirmed from repo | High | keep as runtime reducer rule; add conformance coverage |
+| [apps/indexer/src/importer.ts](/home/maximoto/dev/sats-rover/apps/indexer/src/importer.ts) | reducer/indexer | Legacy alias / compatibility assumptions for `place` | accepts digits-only place ids and resolves to `btcmap:node:<id>` or `osm:node:<id>` candidates | No normative trace; this is compatibility residue only | confirmed from repo | High | classify as degraded compatibility only, not normative meaning |
+| [apps/api/app/services/signals_service.py](/home/maximoto/dev/sats-rover/apps/api/app/services/signals_service.py) | API | Duplicate-day workflow assumption | same-day duplicate lookup uses v2 `(pubkey, place_id, day_utc)` or legacy `signals.signal_date` fallback | [docs/protocol/satsrover-v2.json](/home/maximoto/dev/sats-rover/docs/protocol/satsrover-v2.json) reducer semantics for v2 only; legacy target has no normative authority | confirmed from repo | High | label legacy branch degraded mode |
+| [apps/api/app/services/signals_service.py](/home/maximoto/dev/sats-rover/apps/api/app/services/signals_service.py) | API | Event confirmation semantic surface | canonical confirmation is exact `event_id` presence in `signals_v2_events`; compat probe still exists for legacy `signals` | [docs/protocol/satsrover-v2.json](/home/maximoto/dev/sats-rover/docs/protocol/satsrover-v2.json) and architecture docs | confirmed from repo | Critical | keep canonical rule; mark legacy compat path degraded mode |
+
+### High-confidence inferences
+
+- [inference] The repo’s most dangerous protocol drift is not the existence of multiple runtime sites, but the absence of a single explicit traceability mechanism from those sites back to the normative protocol file.
+
+### Recommendations
+
+- [recommendation][confirmed from repo] Use this table as the required audit surface for any `protocol-authority-cleanup` branch. Intended traceability targets above are design targets, not statements that runtime traceability is already implemented.
+
+## Compatibility fallback inventory
+
+### Confirmed repo facts
+
+| Exact file/path | Fallback trigger | Fallback target / source | Current user-visible effect | Silent today? | Required degraded-mode labeling |
+| --- | --- | --- | --- | --- | --- |
+| [apps/api/app/services/signals_service.py](/home/maximoto/dev/sats-rover/apps/api/app/services/signals_service.py) `_execute_v2_or_v1` | Missing relation `signals_v2_state` or `signals_v2_events` | legacy `signals` table | Feed rows, feed summary, event-ingested probe, and duplicate lookup can answer from legacy state | Partially silent: logs warning, client payload does not disclose fallback | Must be labeled degraded derived mode, never canonical or full derived truth |
+| [apps/api/app/services/signals_service.py](/home/maximoto/dev/sats-rover/apps/api/app/services/signals_service.py) `signals_v2_mixed_mode_falling_back_to_v1` | One v2 query succeeds and companion v2 query fails | legacy `signals` table | Place feed degrades to v1 semantics even in mixed schema state | Partially silent: logs warning, no client-visible degraded flag | Must be labeled degraded derived mode |
+| [apps/api/app/main.py](/home/maximoto/dev/sats-rover/apps/api/app/main.py) `/debug/counts` | Missing relation `signals_v2_events` | legacy `signals` table | Debug counts can report legacy signal totals | Mostly silent to caller beyond returned number | Must be labeled degraded operator/debug mode |
+| [apps/indexer/src/importer.ts](/home/maximoto/dev/sats-rover/apps/indexer/src/importer.ts) `canonicalizePlaceId` | Incoming `place` tag is digits-only legacy id | DB lookup against `places` for `btcmap:node:<id>` then `osm:node:<id>` | Non-canonical place ids may still be accepted into legacy importer path | Yes | Must be labeled degraded ingest compatibility, never normative protocol behavior |
+| [apps/indexer/src/importer.ts](/home/maximoto/dev/sats-rover/apps/indexer/src/importer.ts) `processSatsRoverEvent` | Importer path invoked instead of v2 reducer path | legacy `signals` table | Legacy rows can still be created and glow score updated | Yes | Must be labeled degraded legacy ingest mode |
+| [apps/web/src/app/api/places/[placeId]/feed/route.ts](/home/maximoto/dev/sats-rover/apps/web/src/app/api/places/[placeId]/feed/route.ts) | Upstream feed non-200 or fetch error | Proxy-local `200 { error }` response | Browser cannot distinguish upstream degraded/unavailable/not-observed by status code | Yes | Must preserve degraded derived mode explicitly in later API/proxy contract |
+| [apps/web/src/app/api/checkins/status/route.ts](/home/maximoto/dev/sats-rover/apps/web/src/app/api/checkins/status/route.ts) | Upstream non-OK or 404 | Proxy-local normalization to `pending` or `not_found` | Workflow polling can conceal upstream degradation or ignored params | Yes | Must preserve operator-local degraded mode explicitly |
+
+### Recommendations
+
+- [recommendation][confirmed from repo] Retained fallbacks are acceptable only as explicit degraded mode. They must never present themselves as canonical inputs, canonical observation, or full derived truth.
 
 # 3. KEY ARCHITECTURAL RISKS
 
@@ -219,12 +271,12 @@ This plan will produce a branchable path to: make protocol authority explicit, m
 
 - Task name: Unify schema ownership under migrations
 - Owner boundary: migrations
-- Exact files/modules: [apps/indexer/src/index.ts](/home/maximoto/dev/sats-rover/apps/indexer/src/index.ts), [apps/api/alembic/versions](/home/maximoto/dev/sats-rover/apps/api/alembic/versions), [apps/api/alembic/env.py](/home/maximoto/dev/sats-rover/apps/api/alembic/env.py)
+- Exact files/modules: [apps/indexer/src/index.ts](/home/maximoto/dev/sats-rover/apps/indexer/src/index.ts), [apps/api/alembic/versions](/home/maximoto/dev/sats-rover/apps/api/alembic/versions), [apps/api/alembic/env.py](/home/maximoto/dev/sats-rover/apps/api/alembic/env.py), [apps/api/app/services/places_service.py](/home/maximoto/dev/sats-rover/apps/api/app/services/places_service.py), [docs/protocol/satsrover-v2.json](/home/maximoto/dev/sats-rover/docs/protocol/satsrover-v2.json)
 - Why now: Canonical and derived tables are currently bootstrapped at runtime outside Alembic.
 - Why not later: Schema ownership drift compounds and makes production state harder to audit.
 - Why this task belongs in P0: It is a pure ownership/legibility issue.
-- What ambiguity or drift it reduces immediately: Who owns `signals_v2_events`, `signals_v2_state`, `app_state_claims`, and final `ingestion_state` shape.
-- Expected code/document moves: Add forward Alembic revisions for missing load-bearing tables; replace indexer `CREATE TABLE IF NOT EXISTS` with startup assertions in later implementation.
+- What ambiguity or drift it reduces immediately: Who owns `signals_v2_events`, `signals_v2_state`, `app_state_claims`, and final `ingestion_state` shape; what those durable entities are named; and which column shapes are authoritative.
+- Expected code/document moves: Add forward Alembic revisions for missing load-bearing tables; replace indexer `CREATE TABLE IF NOT EXISTS` with startup assertions in later implementation; document final naming and column-shape choices for `app_state_claims`, `signals_v2_events`, `signals_v2_state`, and `ingestion_state`.
 - Runtime impact in this planning pass: none
 - Runtime impact in later implementation: yes
 - Validation method: `alembic upgrade head` on empty DB must produce the full required schema; indexer startup must fail loudly on missing schema instead of creating it.
@@ -242,7 +294,7 @@ This plan will produce a branchable path to: make protocol authority explicit, m
 - Why not later: Provenance/completeness work in P1 depends on explicit fallback inventory.
 - Why this task belongs in P0: It removes semantic ambiguity before API redesign.
 - What ambiguity or drift it reduces immediately: Whether legacy `signals` and legacy place-id normalization are active, required, or removable.
-- Expected code/document moves: Add legacy classification notes; isolate importer/fallback paths for later removal; document `merchant_claims` as historical-only if unused.
+- Expected code/document moves: Add legacy classification notes; isolate importer/fallback paths for later removal; document `merchant_claims` as historical-only if unused; require any retained fallback to surface degraded-mode labeling rather than canonical/fully-derived semantics.
 - Runtime impact in this planning pass: none
 - Runtime impact in later implementation: yes
 - Validation method: repo inventory, runtime call-graph inventory, and targeted regression tests for fallback entry points.
@@ -269,15 +321,15 @@ This plan will produce a branchable path to: make protocol authority explicit, m
 - Sequencing notes: Complete before P1 response-class mapping.
 - Verification status: confirmed
 
-### Task P0-5: Normalize durable schema naming and ownership map
+#### Subtask P0-2a: Normalize schema naming and column-shape ownership
 
-- Task name: Normalize durable schema naming and ownership map
+- Task name: Normalize schema naming and column-shape ownership
 - Owner boundary: migrations
-- Exact files/modules: [apps/api/alembic/versions/2ef152b01cec_create_signals_table.py](/home/maximoto/dev/sats-rover/apps/api/alembic/versions/2ef152b01cec_create_signals_table.py), [apps/indexer/src/index.ts](/home/maximoto/dev/sats-rover/apps/indexer/src/index.ts), [apps/api/app/services/places_service.py](/home/maximoto/dev/sats-rover/apps/api/app/services/places_service.py), [docs/protocol/satsrover-v2.json](/home/maximoto/dev/sats-rover/docs/protocol/satsrover-v2.json)
-- Why now: `merchant_claims` vs `app_state_claims` and `value` vs `value_json` vs `BIGINT value` create operator confusion.
+- Exact files/modules: [apps/api/alembic/versions/2ef152b01cec_create_signals_table.py](/home/maximoto/dev/sats-rover/apps/api/alembic/versions/2ef152b01cec_create_signals_table.py), [apps/api/alembic/versions/c3e9b2f4a1d0_add_ingestion_state_table.py](/home/maximoto/dev/sats-rover/apps/api/alembic/versions/c3e9b2f4a1d0_add_ingestion_state_table.py), [apps/api/alembic/versions/f1a7c9d2e4b6_ingestion_state_legacy_value_compat.py](/home/maximoto/dev/sats-rover/apps/api/alembic/versions/f1a7c9d2e4b6_ingestion_state_legacy_value_compat.py), [apps/indexer/src/index.ts](/home/maximoto/dev/sats-rover/apps/indexer/src/index.ts), [apps/api/app/services/places_service.py](/home/maximoto/dev/sats-rover/apps/api/app/services/places_service.py), [docs/protocol/satsrover-v2.json](/home/maximoto/dev/sats-rover/docs/protocol/satsrover-v2.json)
+- Why now: `merchant_claims` vs `app_state_claims` and `value` vs `value_json` vs `BIGINT value` create operator confusion and block clear migration ownership.
 - Why not later: Naming drift blocks safe migration ownership work.
-- Why this task belongs in P0: It is a deterministic ownership clarification problem.
-- What ambiguity or drift it reduces immediately: Table/entity naming and column-shape truth.
+- Why this task belongs inside P0-2: It is part of schema ownership, not a separate execution stream.
+- What ambiguity or drift it reduces immediately: Table/entity naming truth and final authoritative column shapes.
 - Expected code/document moves: Forward migration plan, canonical schema matrix, startup assertions for final shapes.
 - Runtime impact in this planning pass: none
 - Runtime impact in later implementation: yes
@@ -315,11 +367,11 @@ This plan will produce a branchable path to: make protocol authority explicit, m
 - Why now: Reducer rules exist in code but are not yet isolated as the product-state definition.
 - Why not later: Provenance and route classification need exact reducer outputs first.
 - Why this task belongs in P1: It clarifies product semantics without changing product scope.
-- What ambiguity or drift it reduces immediately: Whether state is “latest event”, “latest success”, or some hidden heuristic.
-- Expected code/document moves: Reducer semantics doc and conformance test plan.
+- What ambiguity or drift it reduces immediately: Whether state is “latest event”, “latest success”, or some hidden heuristic; how claim-lane current state is selected; how duplicates and supersession behave; and where workflow interpretation touches but does not redefine canonical state.
+- Expected code/document moves: Reducer semantics doc and conformance test plan covering `signals_v2_events`, `signals_v2_state`, and claim-lane reduction into `app_state_claims`.
 - Runtime impact in this planning pass: none
 - Runtime impact in later implementation: yes
-- Validation method: reducer replay tests against `signals_v2_events`.
+- Validation method: reducer replay tests against `signals_v2_events`; claim-lane conformance tests replaying validated `30078` claim events into `app_state_claims`; workflow/canonical-boundary tests ensuring operator-local status routes do not redefine reducer outputs.
 - Blockers/prerequisites: P0-1, P0-2
 - Rollback risk: low
 - Sequencing notes: First P1 task.
@@ -452,7 +504,7 @@ This plan will produce a branchable path to: make protocol authority explicit, m
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `signals_v2_events` | runtime bootstrap in [apps/indexer/src/index.ts](/home/maximoto/dev/sats-rover/apps/indexer/src/index.ts); partial ALTER in [apps/api/alembic/versions/6c2f4b9d7e31_add_raw_event_payment_evidence_to_signals_v2_events.py](/home/maximoto/dev/sats-rover/apps/api/alembic/versions/6c2f4b9d7e31_add_raw_event_payment_evidence_to_signals_v2_events.py) | migrations | same plus [apps/api/app/services/signals_service.py](/home/maximoto/dev/sats-rover/apps/api/app/services/signals_service.py) | Create canonical table in Alembic and formalize indexes/columns there | Assert exact columns including `raw_event` / `payment_evidence` / indexes | canonical schema | confirmed |
 | `signals_v2_state` | runtime bootstrap in [apps/indexer/src/index.ts](/home/maximoto/dev/sats-rover/apps/indexer/src/index.ts) | migrations | [apps/indexer/src/index.ts](/home/maximoto/dev/sats-rover/apps/indexer/src/index.ts), [apps/indexer/src/signals_v2_state.ts](/home/maximoto/dev/sats-rover/apps/indexer/src/signals_v2_state.ts), [apps/api/app/services/places_service.py](/home/maximoto/dev/sats-rover/apps/api/app/services/places_service.py) | Create derived table and indexes in Alembic | Assert PK `(pubkey, place_id, day_utc)` and reducer-owned columns | derived schema | confirmed |
-| `app_state_claims` | runtime bootstrap in [apps/indexer/src/index.ts](/home/maximoto/dev/sats-rover/apps/indexer/src/index.ts) | migrations | [apps/indexer/src/index.ts](/home/maximoto/dev/sats-rover/apps/indexer/src/index.ts), [apps/api/app/services/places_service.py](/home/maximoto/dev/sats-rover/apps/api/app/services/places_service.py) | Create canonical app-state claim table in Alembic | Assert PK `(pubkey, d)` and current columns | derived schema | confirmed |
+| `app_state_claims` | runtime bootstrap in [apps/indexer/src/index.ts](/home/maximoto/dev/sats-rover/apps/indexer/src/index.ts) | migrations | [apps/indexer/src/index.ts](/home/maximoto/dev/sats-rover/apps/indexer/src/index.ts), [apps/api/app/services/places_service.py](/home/maximoto/dev/sats-rover/apps/api/app/services/places_service.py) | Create app-state claim table in Alembic and preserve current reducer key/selection semantics | Assert PK `(pubkey, d)` and current columns | derived schema | confirmed |
 | `ingestion_state` | migrations with `value_json` and `value` text; runtime bootstrap with `value BIGINT` | migrations | [apps/api/alembic/versions/c3e9b2f4a1d0_add_ingestion_state_table.py](/home/maximoto/dev/sats-rover/apps/api/alembic/versions/c3e9b2f4a1d0_add_ingestion_state_table.py), [apps/api/alembic/versions/f1a7c9d2e4b6_ingestion_state_legacy_value_compat.py](/home/maximoto/dev/sats-rover/apps/api/alembic/versions/f1a7c9d2e4b6_ingestion_state_legacy_value_compat.py), [apps/indexer/src/index.ts](/home/maximoto/dev/sats-rover/apps/indexer/src/index.ts), [apps/api/app/main.py](/home/maximoto/dev/sats-rover/apps/api/app/main.py) | Choose final column shape and add forward migration if needed | Assert final shape and compatible read/write paths | operator-local schema | confirmed |
 | `checkin_submissions` | migrations and runtime service writes | migrations | [apps/api/alembic/versions/8d4f9c0a1b2e_create_checkin_submissions_table.py](/home/maximoto/dev/sats-rover/apps/api/alembic/versions/8d4f9c0a1b2e_create_checkin_submissions_table.py), [apps/api/app/services/signals_service.py](/home/maximoto/dev/sats-rover/apps/api/app/services/signals_service.py) | No ownership change; add startup assertion coverage only | Assert presence and expected status constraint | operator-local schema | confirmed |
 | `signals` | legacy migration and compatibility runtime reads/writes | legacy only, not future owner | [apps/api/alembic/versions/2ef152b01cec_create_signals_table.py](/home/maximoto/dev/sats-rover/apps/api/alembic/versions/2ef152b01cec_create_signals_table.py), [apps/api/app/services/signals_service.py](/home/maximoto/dev/sats-rover/apps/api/app/services/signals_service.py), [apps/indexer/src/importer.ts](/home/maximoto/dev/sats-rover/apps/indexer/src/importer.ts) | None in P0 except classification and later deprecation plan | If retained during transition, degraded-mode assertion must be explicit | historical-only | confirmed |
@@ -461,7 +513,8 @@ This plan will produce a branchable path to: make protocol authority explicit, m
 
 ## Recommendations
 
-- [recommendation] Treat `signals_v2_events` as canonical schema, `signals_v2_state` and `app_state_claims` as deterministic derived schema, `checkin_submissions` and `ingestion_state` as operator-local schema, and `signals` / `merchant_claims` as historical-only residue.
+- [recommendation][confirmed from repo] Treat `signals_v2_events` as canonical schema, `signals_v2_state` as deterministic derived schema, `checkin_submissions` and `ingestion_state` as operator-local schema, and `signals` / `merchant_claims` as historical-only residue.
+- [recommendation][high-confidence inference] Treat `app_state_claims` as replayable reducer-owned current-state output for validated `30078` claim-lane events, but keep that label as an inference until a claim-lane rebuild/conformance path exists and proves replayability operationally.
 
 # 12. DOCUMENTATION OUTPUTS
 
@@ -474,7 +527,7 @@ This plan will produce a branchable path to: make protocol authority explicit, m
 | Exact target path | Purpose | Dependencies | Stage | Verification status |
 | --- | --- | --- | --- | --- |
 | [docs/execution-plan-p0-p1.md](/home/maximoto/dev/sats-rover/docs/execution-plan-p0-p1.md) | Durable execution plan, repo memory, LLM/human handoff | none | this pass | confirmed |
-| `docs/protocol-authority.md` | Identify normative protocol authority and runtime traceability rules | P0-1 | P0 | inferred |
+| subordinate inventory section inside [docs/execution-plan-p0-p1.md](/home/maximoto/dev/sats-rover/docs/execution-plan-p0-p1.md) or a future narrow inventory file such as `docs/protocol-constant-inventory.md` | Record runtime protocol traceability without creating a second protocol authority | P0-1 | P0 | high-confidence inference |
 | `docs/reducer-semantics.md` | Repo-specific reducer semantics for canonical and derived state | P1-1 | P1 | inferred |
 | `docs/api-response-classes.md` | Observation / Derived / Operator-local mapping for important routes | P1-2 | P1 | inferred |
 | `docs/relay-observation-semantics.md` | Watermark, replay, observation completeness, and relay-read semantics | P1-5 | P1 | inferred |
@@ -493,6 +546,7 @@ This plan will produce a branchable path to: make protocol authority explicit, m
 | --- | --- | --- | --- | --- |
 | `apps/indexer/src/__tests__/protocolAuthorityConformance.test.ts` | Runtime validators and constants match the normative protocol authority | P0 | unit | inferred |
 | `apps/indexer/src/__tests__/signalsV2ReducerConformance.test.ts` | Replay of `signals_v2_events` yields deterministic `signals_v2_state` outputs and tie-break semantics | P1 | unit / conformance | inferred |
+| `apps/indexer/src/__tests__/claimsReducerConformance.test.ts` | Validated `30078` claim events reduce deterministically into `app_state_claims` with correct replaceable-key and tie-break behavior | P1 | unit / conformance | high-confidence inference |
 | `apps/api/tests/test_schema_startup_assertions.py` | API/indexer fail loudly when required canonical/derived/operator-local schema is missing or wrong | P0 | integration / migration assertion | inferred |
 | `apps/api/tests/test_response_classes_contract.py` | Important routes emit the declared response class semantics | P1 | contract | inferred |
 | `apps/api/tests/test_provenance_semantics.py` | Derived routes encode completeness/provenance vocabulary correctly | P1 | contract | inferred |
@@ -506,11 +560,11 @@ This plan will produce a branchable path to: make protocol authority explicit, m
 | Branch Name | Scope | Owner Boundary | Depends On | Blocked By | Touches Runtime? yes/no | Safe To Land Independently? yes/no |
 | --- | --- | --- | --- | --- | --- | --- |
 | `docs/p0-p1-execution-plan` | This planning artifact only | docs | none | none | no | yes |
-| `docs/protocol-authority-adr-prep` | Protocol authority doc, residue classification, ADR draft extraction | protocol | `docs/p0-p1-execution-plan` | review of this plan | no | yes |
-| `migrations/schema-ownership-v2` | Alembic ownership for v2 ledger/state/claims/ingestion_state; startup assertion design | migrations | `docs/protocol-authority-adr-prep` | schema review | yes | yes |
+| `docs/protocol-traceability-inventory` | Subordinate protocol traceability inventory, residue classification, ADR draft extraction inputs | protocol | `docs/p0-p1-execution-plan` | review of this plan | no | yes |
+| `migrations/schema-ownership-v2` | Alembic ownership for v2 ledger/state/claims/ingestion_state; startup assertion design | migrations | `docs/protocol-traceability-inventory` | schema review | yes | yes |
 | `indexer/protocol-authority-cleanup` | Remove stale protocol exports usage, trace runtime constants to normative source, replace bootstrap creation with assertions | reducer/indexer | `migrations/schema-ownership-v2` | final schema ownership decisions | yes | mostly |
 | `api/legacy-residue-quarantine` | Isolate or deprecate `signals` fallback and importer-related compatibility edges | API | `migrations/schema-ownership-v2` | compatibility-window decision | yes | mostly |
-| `api/response-classes-provenance` | Route class mapping, payload provenance/completeness fields, route signature alignment | API | `docs/protocol-authority-adr-prep`, `api/legacy-residue-quarantine` | route contract review | yes | no |
+| `api/response-classes-provenance` | Route class mapping, payload provenance/completeness fields, route signature alignment | API | `docs/protocol-traceability-inventory`, `api/legacy-residue-quarantine` | route contract review | yes | no |
 | `web/proxy-semantics-alignment` | Update web proxies to preserve response classes/provenance semantics | web client | `api/response-classes-provenance` | final API contract | yes | yes |
 
 If `indexer/protocol-authority-cleanup` and `api/legacy-residue-quarantine` both need to edit [apps/indexer/src/index.ts](/home/maximoto/dev/sats-rover/apps/indexer/src/index.ts) or shared protocol helpers heavily, consolidate them or sequence them strictly after `migrations/schema-ownership-v2`.
@@ -519,7 +573,9 @@ If `indexer/protocol-authority-cleanup` and `api/legacy-residue-quarantine` both
 
 ## Recommendations
 
-### Milestone 1: Week 1
+Sequencing note: the milestones below are execution-order guidance, not calendar commitments. Schema compatibility discovery, fallback inventory, and operational migration constraints may stretch downstream timing.
+
+### Sequencing Milestone 1
 
 - Scope: Finalize architecture decisions and residue inventory.
 - Exact deliverables: approved execution plan; protocol authority inventory; legacy residue classification; ADR recommendations approved in principle.
@@ -529,7 +585,7 @@ If `indexer/protocol-authority-cleanup` and `api/legacy-residue-quarantine` both
 - Validation method: review against actual repo files listed in this plan.
 - Measurable exit criteria: protocol authority source chosen; all major residue paths classified; no disputed owner boundary remains for canonical vs derived vs operator-local state.
 
-### Milestone 2: Week 2
+### Sequencing Milestone 2
 
 - Scope: Migration ownership unification.
 - Exact deliverables: forward Alembic plan/branch for `signals_v2_events`, `signals_v2_state`, `app_state_claims`, `ingestion_state`; startup assertion design.
@@ -539,7 +595,7 @@ If `indexer/protocol-authority-cleanup` and `api/legacy-residue-quarantine` both
 - Validation method: empty-DB migration test plus startup assertion tests.
 - Measurable exit criteria: Alembic head defines all required load-bearing tables; runtime creation paths are marked for removal or assertion-only replacement.
 
-### Milestone 3: Week 3
+### Sequencing Milestone 3
 
 - Scope: Route classes and reducer semantics.
 - Exact deliverables: reducer semantics doc; route-class doc; route contract mismatch fixes scoped and branchable.
@@ -547,9 +603,9 @@ If `indexer/protocol-authority-cleanup` and `api/legacy-residue-quarantine` both
 - Blockers: unresolved compatibility-window questions for legacy `signals`
 - Risk notes: Semantic changes can sprawl unless route inventory stays strict.
 - Validation method: conformance test skeletons and contract fixture review.
-- Measurable exit criteria: every important route assigned exactly one class; reducer tie-break rules and inputs/outputs documented.
+- Measurable exit criteria: every important route assigned exactly one class; signal-lane and claim-lane reducer rules, duplicate handling, and current-state selection rules are documented.
 
-### Milestone 4: Week 4
+### Sequencing Milestone 4
 
 - Scope: Provenance/completeness semantics and web proxy alignment.
 - Exact deliverables: provenance vocabulary; derived route envelope design; web proxy alignment branch plan.
