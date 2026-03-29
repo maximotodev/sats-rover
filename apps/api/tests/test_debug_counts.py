@@ -154,6 +154,7 @@ class DebugCountsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body.get("signals"), 9)
         self.assertTrue(body.get("places_empty"))
         self.assertIsNone(body.get("last_places_sync_at"))
+        self.assertEqual(body.get("degraded_modes"), [])
 
     async def test_debug_counts_prefers_value_json_timestamp_when_present(self):
         with patch(
@@ -188,6 +189,7 @@ class DebugCountsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body.get("signals"), 9)
         self.assertTrue(body.get("places_empty"))
         self.assertEqual(body.get("last_places_sync_at"), "2025-02-02T02:02:02+00:00")
+        self.assertEqual(body.get("degraded_modes"), ["legacy_ingestion_state_fallback"])
 
     async def test_debug_counts_falls_back_to_legacy_signals_when_v2_table_missing(self):
         exc = self._dbapi_error(
@@ -207,7 +209,9 @@ class DebugCountsTests(unittest.IsolatedAsyncioTestCase):
             resp = await self.client.get("/debug/counts")
 
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.json().get("signals"), 7)
+        body = resp.json()
+        self.assertEqual(body.get("signals"), 7)
+        self.assertEqual(body.get("degraded_modes"), ["legacy_signals_fallback"])
 
     async def test_debug_counts_raises_on_non_fallback_db_error(self):
         exc = self._dbapi_error(

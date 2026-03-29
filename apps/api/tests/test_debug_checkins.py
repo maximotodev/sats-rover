@@ -113,6 +113,7 @@ class DebugCheckinsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body["diagnosis"]["code"], "handoff_only")
         self.assertFalse(body["durable_trace_exists"])
         self.assertTrue(body["ephemeral_trace_exists"])
+        self.assertEqual(body["degraded_modes"], [])
 
     async def test_fully_confirmed(self):
         event_id = "c" * 64
@@ -149,6 +150,7 @@ class DebugCheckinsTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(body["diagnosis"]["state_rebuild_recommended"])
         self.assertTrue(body["durable_trace_exists"])
         self.assertFalse(body["ephemeral_trace_exists"])
+        self.assertEqual(body["degraded_modes"], [])
 
     async def test_fully_confirmed_normalizes_stale_pending_redis_state(self):
         event_id = "5" * 64
@@ -182,6 +184,30 @@ class DebugCheckinsTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(body["ephemeral_trace_exists"])
         self.assertEqual(body["redis"]["pending"]["state"], "ok")
         self.assertEqual(body["redis"]["pending"]["reason_code"], "confirmed")
+        self.assertEqual(body["degraded_modes"], ["v2_state_unavailable"])
+
+    async def test_legacy_only_checkin_is_explicitly_degraded(self):
+        event_id = "7" * 64
+        conn = _FakeConn(
+            legacy_by_event={
+                event_id: {
+                    "event_id": event_id,
+                    "pubkey": "8" * 64,
+                    "place_id": "btcmap:legacy",
+                    "status": "success",
+                    "created_at": 1700000000,
+                }
+            }
+        )
+        with patch("app.main.engine", new=_FakeEngine(conn)), patch(
+            "app.main.redis_client", new=_FakeRedis()
+        ):
+            resp = await self.client.get(f"/debug/checkins/{event_id}")
+
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["confirmation_source"], "legacy")
+        self.assertEqual(body["degraded_modes"], ["legacy_ledger_only"])
 
     async def test_duplicate_resolved(self):
         event_id = "e" * 64

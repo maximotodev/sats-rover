@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timezone
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -16,6 +17,7 @@ from app.services.signals_service import (
     _persist_v2_event_metadata,
     confirm_checkin,
     get_checkin_status,
+    get_place_feed,
 )
 
 
@@ -117,7 +119,16 @@ class _MappingsResult:
     def mappings(self):
         return self
 
+    def all(self):
+        if self._row is None:
+            return []
+        if isinstance(self._row, list):
+            return self._row
+        return [self._row]
+
     def first(self):
+        if isinstance(self._row, list):
+            return self._row[0] if self._row else None
         return self._row
 
 
@@ -1097,6 +1108,94 @@ class CheckinsIdempotencyTests(unittest.IsolatedAsyncioTestCase):
             set(extra.keys()),
             {"event_id", "raw_event_conflict", "payment_evidence_conflict"},
         )
+
+
+class PlaceFeedDegradedModeTests(unittest.IsolatedAsyncioTestCase):
+    def _missing_relation(self, relation: str) -> DBAPIError:
+        class _DummyOrig(Exception):
+            def __init__(self, message: str):
+                super().__init__(message)
+                self.sqlstate = "42P01"
+
+        return DBAPIError(
+            "SELECT 1",
+            {},
+            _DummyOrig(f'relation "{relation}" does not exist'),
+        )
+
+    async def test_get_place_feed_marks_legacy_fallback_explicitly(self):
+        db = AsyncMock()
+
+        async def _db_execute(stmt, params):
+            sql = str(stmt)
+            if "FROM signals_v2_state" in sql:
+                raise self._missing_relation("signals_v2_state")
+            if "FROM signals\n" in sql and "ORDER BY created_at DESC" in sql:
+                return _MappingsResult(
+                    [
+                        {
+                            "event_id": "a" * 64,
+                            "pubkey": "b" * 64,
+                            "status": "success",
+                            "created_at": datetime(2026, 1, 1, tzinfo=timezone.utc),
+                        }
+                    ]
+                )
+            if "FROM signals\n" in sql and "COUNT(*)::int AS total_signals" in sql:
+                return _MappingsResult(
+                    {
+                        "total_signals": 1,
+                        "recent_successes": 1,
+                        "last_confirmed_at": datetime(2026, 1, 1, tzinfo=timezone.utc),
+                    }
+                )
+            raise AssertionError(f"unexpected SQL: {sql}")
+
+        db.execute = AsyncMock(side_effect=_db_execute)
+
+        out = await get_place_feed(db, "btcmap:abc", limit=10)
+
+        self.assertEqual(out.degraded_mode, "legacy_signals_fallback")
+        self.assertEqual(out.items[0].content, "")
+
+    async def test_get_place_feed_marks_mixed_mode_explicitly(self):
+        db = AsyncMock()
+        signals_v2_state_calls = 0
+
+        async def _db_execute(stmt, params):
+            nonlocal signals_v2_state_calls
+            sql = str(stmt)
+            if "FROM signals_v2_state" in sql and "ORDER BY created_at DESC, event_id DESC" in sql:
+                signals_v2_state_calls += 1
+                return _MappingsResult(
+                    [
+                        {
+                            "event_id": "c" * 64,
+                            "pubkey": "d" * 64,
+                            "status": "success",
+                            "created_at": 1700000000,
+                            "content": "ok",
+                        }
+                    ]
+                )
+            if "FROM signals_v2_state" in sql and "COUNT(*)::int AS total_signals" in sql:
+                raise self._missing_relation("signals_v2_state")
+            if "FROM signals\n" in sql and "COUNT(*)::int AS total_signals" in sql:
+                return _MappingsResult(
+                    {
+                        "total_signals": 1,
+                        "recent_successes": 1,
+                        "last_confirmed_at": datetime(2026, 1, 1, tzinfo=timezone.utc),
+                    }
+                )
+            raise AssertionError(f"unexpected SQL: {sql}")
+
+        db.execute = AsyncMock(side_effect=_db_execute)
+
+        out = await get_place_feed(db, "btcmap:def", limit=10)
+
+        self.assertEqual(out.degraded_mode, "mixed_v2_v1_fallback")
+        self.assertEqual(out.items[0].content, "")
 
 
 if __name__ == "__main__":
