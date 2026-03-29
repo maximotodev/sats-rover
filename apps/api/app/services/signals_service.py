@@ -32,6 +32,8 @@ _ALLOWED_V2_MISSING_RELATIONS = {"signals_v2_state", "signals_v2_events"}
 _SIGNAL_CONTENT_MAX_LEN = 4096
 _PAYMENT_EVIDENCE_MAX_LEN = 8 * 1024
 _RAW_EVENT_MAX_LEN = 32 * 1024
+_DEGRADED_MODE_LEGACY_SIGNALS_FALLBACK = "legacy_signals_fallback"
+_DEGRADED_MODE_MIXED_V2_V1_FALLBACK = "mixed_v2_v1_fallback"
 
 
 def _extract_missing_relation_name(exc: Exception) -> str | None:
@@ -359,6 +361,7 @@ async def get_place_feed(db: AsyncSession, place_id: str, limit: int = 50) -> Pl
     )
 
     use_v2_mode = using_v2_rows and using_v2_summary
+    degraded_mode: str | None = None
     if using_v2_rows != using_v2_summary:
         logger.warning(
             "signals_v2_mixed_mode_falling_back_to_v1",
@@ -368,6 +371,9 @@ async def get_place_feed(db: AsyncSession, place_id: str, limit: int = 50) -> Pl
                 "using_v2_summary": using_v2_summary,
             },
         )
+        degraded_mode = _DEGRADED_MODE_MIXED_V2_V1_FALLBACK
+    elif not use_v2_mode:
+        degraded_mode = _DEGRADED_MODE_LEGACY_SIGNALS_FALLBACK
 
     total = int(summary["total_signals"] or 0) if summary else 0
     successes = int(summary["recent_successes"] or 0) if summary else 0
@@ -429,6 +435,7 @@ async def get_place_feed(db: AsyncSession, place_id: str, limit: int = 50) -> Pl
         total_signals=total,
         recent_successes=successes,
         last_confirmed_at=last_confirmed_at,
+        degraded_mode=degraded_mode,
         items=items,
     )
 

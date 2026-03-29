@@ -221,6 +221,7 @@ export async function processSatsRoverEvent(pool: Pool, event: Event) {
         rawPlaceId,
         canonicalPlaceId: placeId,
         eventId: event.id,
+        degraded_mode: "legacy_place_id_normalization",
       });
     }
 
@@ -265,6 +266,12 @@ export async function processSatsRoverEvent(pool: Pool, event: Event) {
         event.id,
         "importer_legacy_inserted_signal",
       );
+      log("info", "importer_legacy_path_used", {
+        eventId: event.id,
+        placeId,
+        status,
+        degraded_mode: "legacy_signals_importer",
+      });
       return { placeId, status };
     }
 
@@ -273,6 +280,13 @@ export async function processSatsRoverEvent(pool: Pool, event: Event) {
       event.id,
       "importer_legacy_noop",
     );
+    log("info", "importer_legacy_path_used", {
+      eventId: event.id,
+      placeId,
+      status,
+      degraded_mode: "legacy_signals_importer",
+      noop: true,
+    });
     return null;
   } catch (err: any) {
     if (err.code === "23505") {

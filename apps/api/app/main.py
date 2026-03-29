@@ -30,6 +30,10 @@ app.include_router(checkins_router)
 app.include_router(signals_router)
 
 _HEX64_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+_DEGRADED_MODE_LEGACY_SIGNALS_FALLBACK = "legacy_signals_fallback"
+_DEGRADED_MODE_LEGACY_INGESTION_STATE_FALLBACK = "legacy_ingestion_state_fallback"
+_DEGRADED_MODE_V2_STATE_UNAVAILABLE = "v2_state_unavailable"
+_DEGRADED_MODE_LEGACY_LEDGER_ONLY = "legacy_ledger_only"
 
 
 def _extract_missing_relation_name(exc: Exception) -> str | None:
@@ -224,6 +228,7 @@ async def _execute_v2_optional_first(conn, sql: str, params: dict) -> dict | Non
 
 @app.get("/debug/counts")
 async def debug_counts():
+    degraded_modes: list[str] = []
     async with engine.connect() as conn:
         places = (await conn.execute(text("SELECT count(*) FROM places"))).scalar_one()
         try:
@@ -235,6 +240,7 @@ async def debug_counts():
             if missing_relation != "signals_v2_events":
                 raise
             signals = (await conn.execute(text("SELECT count(*) FROM signals"))).scalar_one()
+            degraded_modes.append(_DEGRADED_MODE_LEGACY_SIGNALS_FALLBACK)
         ingestion_row = (
             await conn.execute(
                 text(
@@ -263,6 +269,7 @@ async def debug_counts():
                         epoch_seconds,
                         tz=timezone.utc,
                     ).isoformat()
+                    degraded_modes.append(_DEGRADED_MODE_LEGACY_INGESTION_STATE_FALLBACK)
                 except (TypeError, ValueError, OSError):
                     last_places_sync_at = None
     return {
@@ -270,6 +277,7 @@ async def debug_counts():
         "signals": signals,
         "places_empty": places == 0,
         "last_places_sync_at": last_places_sync_at,
+        "degraded_modes": sorted(set(degraded_modes)),
     }
 
 
@@ -476,6 +484,11 @@ async def debug_checkin(event_id: str):
             )
         )
     )
+    degraded_modes: list[str] = []
+    if legacy_exists and not ledger_exists:
+        degraded_modes.append(_DEGRADED_MODE_LEGACY_LEDGER_ONLY)
+    if ledger_exists and not state_exists:
+        degraded_modes.append(_DEGRADED_MODE_V2_STATE_UNAVAILABLE)
 
     traces_exist = durable_trace_exists or ephemeral_trace_exists
     confirmation_source = "v2" if ledger_exists else ("legacy" if legacy_exists else None)
@@ -607,6 +620,7 @@ async def debug_checkin(event_id: str):
         "v2_ingested": ledger_exists,
         "legacy_ingested": legacy_exists,
         "confirmation_source": confirmation_source,
+        "degraded_modes": degraded_modes,
         "status_semantics_consistent": status_semantics_consistent,
         "diagnosis": {
             "code": diagnosis_code,

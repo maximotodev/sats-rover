@@ -23,6 +23,7 @@ class PlaceFeedOut(BaseModel):
     total_signals: int = 0
     recent_successes: int = 0
     last_confirmed_at: datetime | None = None
+    degraded_mode: str | None = None
     items: list[SignalFeedItem] = Field(default_factory=list)
 
 
