@@ -12,6 +12,18 @@ import {
   normalizeDebugSignalEventId,
   shouldAuditSignalEvent,
 } from "./signal_event_audit.js";
+import {
+  buildClaimsReqFilter,
+  SATSROVER_APP_STATE_KIND,
+  SATSROVER_CLAIM_D_PREFIX,
+  SATSROVER_CLAIM_REQUIRED_ROLE,
+  SATSROVER_HASHTAGS,
+  SATSROVER_PROTOCOL_VERSION,
+  SATSROVER_SIGNAL_KIND,
+  SATSROVER_SIGNAL_KNOWN_TAGS,
+  SATSROVER_SIGNAL_STATUSES,
+  SATSROVER_TAGS,
+} from "./protocol_authority.js";
 import { assertRequiredIndexerSchema } from "./schema_requirements.js";
 import { upsertSignalsV2StateRow } from "./signals_v2_state.js";
 import {
@@ -77,22 +89,12 @@ const MAX_TAG_FIELD_LENGTH = 200;
 const VERIFICATION_TAG_SCAN_LIMIT = 64;
 const MAX_CREATED_AT_FUTURE_SKEW_SEC = 10 * 60;
 const MAX_CREATED_AT_AGE_SEC = 30 * 24 * 60 * 60;
-const ALLOWED_EVENT_KINDS = new Set([1, 30331]);
-const SOFT_V2_ALLOWED_STATUS = new Set(["success", "failed", "did_not_try"]);
-const SOFT_V2_KNOWN_TAGS = new Set([
-  "t",
-  "v",
-  "place",
-  "status",
-  "g",
-  "client",
-  "amount_msat",
-  "zap",
-  "bolt11",
-]);
+const ALLOWED_EVENT_KINDS = new Set([1, SATSROVER_SIGNAL_KIND]);
+const SOFT_V2_ALLOWED_STATUS = new Set<string>(SATSROVER_SIGNAL_STATUSES);
+const SOFT_V2_KNOWN_TAGS = new Set<string>(SATSROVER_SIGNAL_KNOWN_TAGS);
 const SOFT_V2_GEOHASH_CHARS = "0123456789bcdefghjkmnpqrstuvwxyz";
-const CLAIMS_KIND = 30078;
-const SIGNALS_KIND = 30331;
+const CLAIMS_KIND = SATSROVER_APP_STATE_KIND;
+const SIGNALS_KIND = SATSROVER_SIGNAL_KIND;
 const MAX_CLAIM_D_LENGTH = 240;
 const MAX_CLAIM_CONTENT_BYTES = 4096;
 const MAX_SIGNALS_V2_CONTENT_BYTES = 4096;
@@ -268,37 +270,37 @@ function validateClaimsEventStrict(event: any, nowSec: number): ClaimsValidation
       return { ok: false, reason: "invalid_tags_shape", eventId: event.id };
     }
     const tagName = tag[0];
-    if (tagName === "t") {
+    if (tagName === SATSROVER_TAGS.TOPIC) {
       tCount += 1;
       if (typeof tag[1] === "string") tValue = tag[1];
       continue;
     }
-    if (tagName === "v") {
+    if (tagName === SATSROVER_TAGS.VERSION) {
       vCount += 1;
       if (typeof tag[1] === "string") vValue = tag[1];
       continue;
     }
-    if (tagName === "d") {
+    if (tagName === SATSROVER_TAGS.IDENTIFIER) {
       dCount += 1;
       if (typeof tag[1] === "string") dValue = tag[1];
       continue;
     }
-    if (tagName === "place") {
+    if (tagName === SATSROVER_TAGS.PLACE) {
       placeCount += 1;
       if (typeof tag[1] === "string") placeValue = tag[1];
       continue;
     }
-    if (tagName === "role") {
+    if (tagName === SATSROVER_TAGS.ROLE) {
       roleCount += 1;
       if (typeof tag[1] === "string") roleValue = tag[1];
       continue;
     }
   }
 
-  if (tCount === 0 || tValue !== "satsrover-claim") {
+  if (tCount === 0 || tValue !== SATSROVER_HASHTAGS.CLAIM) {
     return { ok: false, reason: "missing_or_invalid_t", eventId: event.id };
   }
-  if (vCount === 0 || vValue !== "2") {
+  if (vCount === 0 || vValue !== SATSROVER_PROTOCOL_VERSION) {
     return { ok: false, reason: "missing_or_invalid_v", eventId: event.id };
   }
   if (dCount === 0 || typeof dValue !== "string") {
@@ -307,7 +309,7 @@ function validateClaimsEventStrict(event: any, nowSec: number): ClaimsValidation
   if (placeCount === 0 || typeof placeValue !== "string") {
     return { ok: false, reason: "missing_or_invalid_place", eventId: event.id };
   }
-  if (roleCount === 0 || roleValue !== "owner") {
+  if (roleCount === 0 || roleValue !== SATSROVER_CLAIM_REQUIRED_ROLE) {
     return { ok: false, reason: "missing_or_invalid_role", eventId: event.id };
   }
   if (tCount > 1 || vCount > 1 || dCount > 1 || placeCount > 1 || roleCount > 1) {
@@ -319,10 +321,10 @@ function validateClaimsEventStrict(event: any, nowSec: number): ClaimsValidation
   if (placeValue.length > PREFILTER_MAX_PLACE_ID_LENGTH) {
     return { ok: false, reason: "place_too_long", eventId: event.id };
   }
-  if (!dValue.startsWith("claim:")) {
+  if (!dValue.startsWith(SATSROVER_CLAIM_D_PREFIX)) {
     return { ok: false, reason: "invalid_d_prefix", eventId: event.id };
   }
-  const dPlace = dValue.slice("claim:".length);
+  const dPlace = dValue.slice(SATSROVER_CLAIM_D_PREFIX.length);
   if (dPlace !== placeValue) {
     return { ok: false, reason: "d_place_mismatch", eventId: event.id };
   }
@@ -463,27 +465,27 @@ function parseSignalsV2EventStrict(event: any, nowSec: number): SignalsV2ParseRe
     const tagName = tag[0];
     const tagValue = typeof tag[1] === "string" ? tag[1] : null;
 
-    if (tagName === "t") {
+    if (tagName === SATSROVER_TAGS.TOPIC) {
       tCount += 1;
       tValue = tagValue;
       continue;
     }
-    if (tagName === "v") {
+    if (tagName === SATSROVER_TAGS.VERSION) {
       vCount += 1;
       vValue = tagValue;
       continue;
     }
-    if (tagName === "place") {
+    if (tagName === SATSROVER_TAGS.PLACE) {
       placeCount += 1;
       placeValue = tagValue;
       continue;
     }
-    if (tagName === "status") {
+    if (tagName === SATSROVER_TAGS.STATUS) {
       statusCount += 1;
       statusValue = tagValue;
       continue;
     }
-    if (tagName === "g") {
+    if (tagName === SATSROVER_TAGS.GEOHASH) {
       gCount += 1;
       if (typeof tagValue !== "string" || !isSoftV2Geohash(tagValue)) {
         return { ok: false, reason: "invalid_g", eventId: event.id };
@@ -491,12 +493,12 @@ function parseSignalsV2EventStrict(event: any, nowSec: number): SignalsV2ParseRe
       gValue = tagValue;
       continue;
     }
-    if (tagName === "client") {
+    if (tagName === SATSROVER_TAGS.CLIENT) {
       clientCount += 1;
       clientValue = tagValue;
       continue;
     }
-    if (tagName === "amount_msat") {
+    if (tagName === SATSROVER_TAGS.AMOUNT_MSAT) {
       amountMsatCount += 1;
       if (
         typeof tagValue !== "string" ||
@@ -516,7 +518,7 @@ function parseSignalsV2EventStrict(event: any, nowSec: number): SignalsV2ParseRe
       }
       continue;
     }
-    if (tagName === "zap") {
+    if (tagName === SATSROVER_TAGS.ZAP) {
       zapCount += 1;
       if (typeof tagValue !== "string" || !isHex64(tagValue)) {
         return { ok: false, reason: "invalid_zap", eventId: event.id };
@@ -524,7 +526,7 @@ function parseSignalsV2EventStrict(event: any, nowSec: number): SignalsV2ParseRe
       zapValue = tagValue;
       continue;
     }
-    if (tagName === "bolt11") {
+    if (tagName === SATSROVER_TAGS.BOLT11) {
       bolt11Count += 1;
       if (typeof tagValue !== "string" || tagValue.length > 2000) {
         return { ok: false, reason: "invalid_bolt11", eventId: event.id };
@@ -540,10 +542,10 @@ function parseSignalsV2EventStrict(event: any, nowSec: number): SignalsV2ParseRe
   if (gCount > 1 || clientCount > 1 || amountMsatCount > 1 || zapCount > 1 || bolt11Count > 1) {
     return { ok: false, reason: "duplicate_optional_tag", eventId: event.id };
   }
-  if (tCount === 0 || tValue !== "satsrover") {
+  if (tCount === 0 || tValue !== SATSROVER_HASHTAGS.ROOT) {
     return { ok: false, reason: "missing_or_invalid_t", eventId: event.id };
   }
-  if (vCount === 0 || vValue !== "2") {
+  if (vCount === 0 || vValue !== SATSROVER_PROTOCOL_VERSION) {
     return { ok: false, reason: "missing_or_invalid_v", eventId: event.id };
   }
   if (placeCount === 0 || typeof placeValue !== "string" || placeValue.length === 0) {
@@ -552,7 +554,7 @@ function parseSignalsV2EventStrict(event: any, nowSec: number): SignalsV2ParseRe
   if (statusCount === 0 || typeof statusValue !== "string") {
     return { ok: false, reason: "missing_or_invalid_status", eventId: event.id };
   }
-  if (statusValue !== "success" && statusValue !== "failed" && statusValue !== "did_not_try") {
+  if (!SOFT_V2_ALLOWED_STATUS.has(statusValue)) {
     return { ok: false, reason: "invalid_status", eventId: event.id };
   }
   if (placeValue.length > PREFILTER_MAX_PLACE_ID_LENGTH) {
@@ -565,7 +567,7 @@ function parseSignalsV2EventStrict(event: any, nowSec: number): SignalsV2ParseRe
     eventId: event.id,
     createdAt: event.created_at,
     placeId: placeValue,
-    status: statusValue,
+    status: statusValue as "success" | "failed" | "did_not_try",
     dayUtc: Math.floor(event.created_at / 86400),
     g: gValue,
     client: clientValue,
@@ -975,7 +977,7 @@ function shouldProcessEvent(event: any): {
   for (const tag of tags) {
     if (
       Array.isArray(tag) &&
-      tag[0] === "place" &&
+      tag[0] === SATSROVER_TAGS.PLACE &&
       typeof tag[1] === "string"
     ) {
       placeValue = tag[1];
@@ -1155,9 +1157,13 @@ function getEventVersionLabel(event: any): string {
   const tags = event?.tags;
   if (!Array.isArray(tags)) return "missing";
   for (const tag of tags) {
-    if (Array.isArray(tag) && tag[0] === "v" && typeof tag[1] === "string") {
+    if (
+      Array.isArray(tag) &&
+      tag[0] === SATSROVER_TAGS.VERSION &&
+      typeof tag[1] === "string"
+    ) {
       if (tag[1] === "1") return "1";
-      if (tag[1] === "2") return "2";
+      if (tag[1] === SATSROVER_PROTOCOL_VERSION) return SATSROVER_PROTOCOL_VERSION;
       return "other";
     }
   }
@@ -1166,15 +1172,15 @@ function getEventVersionLabel(event: any): string {
 
 function normalizeSoftV2UnknownTag(tagName: string): string {
   if (
-    tagName === "t" ||
-    tagName === "v" ||
-    tagName === "place" ||
-    tagName === "status" ||
-    tagName === "g" ||
-    tagName === "client" ||
-    tagName === "amount_msat" ||
-    tagName === "zap" ||
-    tagName === "bolt11"
+    tagName === SATSROVER_TAGS.TOPIC ||
+    tagName === SATSROVER_TAGS.VERSION ||
+    tagName === SATSROVER_TAGS.PLACE ||
+    tagName === SATSROVER_TAGS.STATUS ||
+    tagName === SATSROVER_TAGS.GEOHASH ||
+    tagName === SATSROVER_TAGS.CLIENT ||
+    tagName === SATSROVER_TAGS.AMOUNT_MSAT ||
+    tagName === SATSROVER_TAGS.ZAP ||
+    tagName === SATSROVER_TAGS.BOLT11
   ) {
     return tagName;
   }
@@ -1234,22 +1240,22 @@ function validateSignalsV2Soft(event: any): {
       continue;
     }
 
-    if (tagName === "t") {
+    if (tagName === SATSROVER_TAGS.TOPIC) {
       tCount += 1;
-      if (tagValue === "satsrover") hasTSatsrover = true;
+      if (tagValue === SATSROVER_HASHTAGS.ROOT) hasTSatsrover = true;
       continue;
     }
-    if (tagName === "v") {
+    if (tagName === SATSROVER_TAGS.VERSION) {
       vCount += 1;
-      if (tagValue === "2") hasV2 = true;
+      if (tagValue === SATSROVER_PROTOCOL_VERSION) hasV2 = true;
       continue;
     }
-    if (tagName === "place") {
+    if (tagName === SATSROVER_TAGS.PLACE) {
       placeCount += 1;
       if (typeof tag[1] === "string" && tag[1].length > 0) hasPlace = true;
       continue;
     }
-    if (tagName === "status") {
+    if (tagName === SATSROVER_TAGS.STATUS) {
       statusCount += 1;
       if (typeof tag[1] === "string" && tag[1].length > 0) hasStatus = true;
       if (!SOFT_V2_ALLOWED_STATUS.has(tagValue)) {
@@ -1257,18 +1263,18 @@ function validateSignalsV2Soft(event: any): {
       }
       continue;
     }
-    if (tagName === "g") {
+    if (tagName === SATSROVER_TAGS.GEOHASH) {
       gCount += 1;
       if (typeof tag[1] !== "string" || !isSoftV2Geohash(tag[1])) {
         reasons.push("invalid_g");
       }
       continue;
     }
-    if (tagName === "client") {
+    if (tagName === SATSROVER_TAGS.CLIENT) {
       clientCount += 1;
       continue;
     }
-    if (tagName === "amount_msat") {
+    if (tagName === SATSROVER_TAGS.AMOUNT_MSAT) {
       amountMsatCount += 1;
       if (
         typeof tag[1] !== "string" ||
@@ -1279,14 +1285,14 @@ function validateSignalsV2Soft(event: any): {
       }
       continue;
     }
-    if (tagName === "zap") {
+    if (tagName === SATSROVER_TAGS.ZAP) {
       zapCount += 1;
       if (typeof tag[1] !== "string" || !isHex64(tag[1])) {
         reasons.push("invalid_zap");
       }
       continue;
     }
-    if (tagName === "bolt11") {
+    if (tagName === SATSROVER_TAGS.BOLT11) {
       bolt11Count += 1;
       if (typeof tag[1] !== "string" || tag[1].length > 2000) {
         reasons.push("invalid_bolt11");
@@ -1414,7 +1420,7 @@ function connect(url: string) {
     log("info", "relay_connected", { relay: url });
     log("info", "relay_subscribe", {
       relay: url,
-      kinds: [30331],
+      kinds: [SATSROVER_SIGNAL_KIND],
       since: signalsSinceCreatedAt,
     });
     ws.send(
@@ -1435,12 +1441,7 @@ function connect(url: string) {
       JSON.stringify([
         "REQ",
         "sr_claims",
-        {
-          kinds: [CLAIMS_KIND],
-          "#t": ["satsrover-claim"],
-          "#v": ["2"],
-          since: claimsSinceCreatedAt,
-        },
+        buildClaimsReqFilter(claimsSinceCreatedAt),
       ]),
     );
   });
@@ -1835,7 +1836,10 @@ function connect(url: string) {
           return;
         }
 
-        if (kindLabel === String(SIGNALS_KIND) && versionLabel === "2") {
+        if (
+          kindLabel === String(SIGNALS_KIND) &&
+          versionLabel === SATSROVER_PROTOCOL_VERSION
+        ) {
           signalsV2SeenTotal.labels(SIGNALS_LANE).inc();
           const parsedV2 = parseSignalsV2EventStrict(event, nowSec);
           if (!parsedV2.ok) {

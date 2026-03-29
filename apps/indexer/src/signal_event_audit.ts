@@ -1,3 +1,9 @@
+import {
+  SATSROVER_SIGNAL_KIND,
+  SATSROVER_SIGNAL_STATUSES,
+  SATSROVER_TAGS,
+} from "./protocol_authority.js";
+
 export type SignalAuditStage =
   | "relay_event_observed"
   | "prefilter_rejected"
@@ -22,7 +28,7 @@ export type SignalAuditDecision = {
 };
 
 const HEX64_RE = /^[0-9a-fA-F]{64}$/;
-const ALLOWED_STATUS = new Set(["success", "failed", "did_not_try"]);
+const ALLOWED_STATUS = new Set<string>(SATSROVER_SIGNAL_STATUSES);
 
 function firstTagValue(tags: unknown, key: string): string | null {
   if (!Array.isArray(tags)) return null;
@@ -60,8 +66,8 @@ export function evaluateSignalsV2EventDecision(
   nowSec: number,
 ): SignalAuditDecision {
   const tags = event?.tags;
-  const placeId = firstTagValue(tags, "place");
-  const statusValue = firstTagValue(tags, "status");
+  const placeId = firstTagValue(tags, SATSROVER_TAGS.PLACE);
+  const statusValue = firstTagValue(tags, SATSROVER_TAGS.STATUS);
   const kind = event?.kind;
   const eventId = event?.id;
   const pubkey = event?.pubkey;
@@ -85,7 +91,7 @@ export function evaluateSignalsV2EventDecision(
       status: null,
     };
   }
-  if (kind !== 30331) {
+  if (kind !== SATSROVER_SIGNAL_KIND) {
     return {
       accepted: false,
       stage: "signals_v2_rejected",
