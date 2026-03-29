@@ -6,6 +6,7 @@ Create Date: 2026-03-05
 """
 
 from alembic import op
+import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
@@ -16,6 +17,19 @@ depends_on = None
 
 
 def upgrade() -> None:
+    bind = op.get_bind()
+    table_exists = bool(
+        bind.execute(
+            sa.text(
+                """
+                SELECT to_regclass(current_schema() || '.signals_v2_events') IS NOT NULL
+                """
+            )
+        ).scalar()
+    )
+    if not table_exists:
+        return
+
     with op.get_context().autocommit_block():
         op.execute(
             """
