@@ -12,6 +12,7 @@ import {
   normalizeDebugSignalEventId,
   shouldAuditSignalEvent,
 } from "./signal_event_audit.js";
+import { assertRequiredIndexerSchema } from "./schema_requirements.js";
 import { upsertSignalsV2StateRow } from "./signals_v2_state.js";
 import {
   dbConflictTotal,
@@ -167,91 +168,6 @@ type RelayStats = {
 const relayStats = new Map<string, RelayStats>();
 let cachedSignalsWatermarkSec = 0;
 let cachedClaimsWatermarkSec = 0;
-
-async function ensureIngestionStateTable(pool: Pool): Promise<void> {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS ingestion_state (
-      key TEXT PRIMARY KEY,
-      value BIGINT NOT NULL,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    )
-  `);
-}
-
-async function ensureClaimsTable(pool: Pool): Promise<void> {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS app_state_claims (
-      pubkey TEXT NOT NULL,
-      d TEXT NOT NULL,
-      place_id TEXT NOT NULL,
-      role TEXT NOT NULL,
-      created_at BIGINT NOT NULL,
-      event_id TEXT NOT NULL,
-      content TEXT NOT NULL,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      PRIMARY KEY (pubkey, d)
-    )
-  `);
-}
-
-async function ensureSignalsV2Tables(pool: Pool): Promise<void> {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS signals_v2_events (
-      event_id TEXT PRIMARY KEY,
-      pubkey TEXT NOT NULL,
-      created_at BIGINT NOT NULL,
-      place_id TEXT NOT NULL,
-      status TEXT NOT NULL,
-      day_utc INTEGER NOT NULL,
-      g TEXT NULL,
-      client TEXT NULL,
-      amount_msat BIGINT NULL,
-      zap TEXT NULL,
-      bolt11 TEXT NULL,
-      content TEXT NOT NULL,
-      raw_event JSONB NULL,
-      payment_evidence JSONB NULL,
-      relay TEXT NULL,
-      inserted_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    )
-  `);
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS signals_v2_state (
-      pubkey TEXT NOT NULL,
-      place_id TEXT NOT NULL,
-      day_utc INTEGER NOT NULL,
-      status TEXT NOT NULL,
-      created_at BIGINT NOT NULL,
-      event_id TEXT NOT NULL,
-      g TEXT NULL,
-      client TEXT NULL,
-      amount_msat BIGINT NULL,
-      zap TEXT NULL,
-      bolt11 TEXT NULL,
-      content TEXT NOT NULL,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      PRIMARY KEY (pubkey, place_id, day_utc)
-    )
-  `);
-}
-
-async function assertSignalsV2LedgerColumns(pool: Pool): Promise<void> {
-  const res = await pool.query<{ column_name: string }>(
-    `
-      SELECT column_name
-      FROM information_schema.columns
-      WHERE table_schema = current_schema()
-        AND table_name = 'signals_v2_events'
-        AND column_name IN ('raw_event', 'payment_evidence')
-    `,
-  );
-  const columns = new Set(res.rows.map((row) => row.column_name));
-  if (!columns.has("raw_event") || !columns.has("payment_evidence")) {
-    throw new Error(
-      "signals_v2_events missing required columns raw_event/payment_evidence; run alembic upgrade head",
-    );
-  }
-}
 
 async function getWatermark(pool: Pool, key: string): Promise<number> {
   const res = await pool.query<{ value: string | number }>(
@@ -2111,55 +2027,34 @@ function connect(url: string) {
   });
 }
 
-log("info", "indexer_start", { relayCount: RELAYS.length });
-startMetricsServer(METRICS_PORT);
-startStatsTimerIfNeeded();
-// Delay relay connects until ingestion_state init attempt finishes to avoid
-// early watermark SELECT failures during startup.
-ensureIngestionStateTable(pool)
-  .then(() =>
-    ensureClaimsTable(pool).catch((err: any) => {
-      log("error", "claims_table_init_failed", {
-        error: err?.message || String(err),
-      });
-      throw err;
-    }),
-  )
-  .then(() =>
-    ensureSignalsV2Tables(pool).catch((err: any) => {
-      log("error", "signals_v2_table_init_failed", {
-        error: err?.message || String(err),
-      });
-      throw err;
-    }),
-  )
-  .then(() => assertSignalsV2LedgerColumns(pool))
-  .then(() =>
-    Promise.all([
-      getWatermark(pool, SIGNALS_WATERMARK_KEY),
-      getWatermark(pool, CLAIMS_WATERMARK_KEY),
-    ]),
-  )
-  .then(([signalsWatermarkSec, claimsWatermarkSec]) => {
-    cachedSignalsWatermarkSec = signalsWatermarkSec;
-    cachedClaimsWatermarkSec = claimsWatermarkSec;
-    watermarkValue.labels(SIGNALS_LANE).set(cachedSignalsWatermarkSec);
-    watermarkValue.labels(CLAIMS_LANE).set(cachedClaimsWatermarkSec);
-    if (signalsWatermarkSec === 0) {
-      log("warn", "watermark_zero_after_init", {
-        key: SIGNALS_WATERMARK_KEY,
-      });
-    }
-  })
-  .catch((err: any) => {
-    log("error", "ingestion_state_init_failed", {
-      error: err?.message || String(err),
+async function initializeIndexer(): Promise<void> {
+  await assertRequiredIndexerSchema(pool);
+  const [signalsWatermarkSec, claimsWatermarkSec] = await Promise.all([
+    getWatermark(pool, SIGNALS_WATERMARK_KEY),
+    getWatermark(pool, CLAIMS_WATERMARK_KEY),
+  ]);
+  cachedSignalsWatermarkSec = signalsWatermarkSec;
+  cachedClaimsWatermarkSec = claimsWatermarkSec;
+  watermarkValue.labels(SIGNALS_LANE).set(cachedSignalsWatermarkSec);
+  watermarkValue.labels(CLAIMS_LANE).set(cachedClaimsWatermarkSec);
+  if (signalsWatermarkSec === 0) {
+    log("warn", "watermark_zero_after_init", {
+      key: SIGNALS_WATERMARK_KEY,
     });
-    cachedSignalsWatermarkSec = 0;
-    cachedClaimsWatermarkSec = 0;
-    watermarkValue.labels(SIGNALS_LANE).set(cachedSignalsWatermarkSec);
-    watermarkValue.labels(CLAIMS_LANE).set(cachedClaimsWatermarkSec);
-  })
-  .finally(() => {
-    RELAYS.forEach(connect);
-  });
+  }
+}
+
+async function main(): Promise<void> {
+  log("info", "indexer_start", { relayCount: RELAYS.length });
+  startMetricsServer(METRICS_PORT);
+  startStatsTimerIfNeeded();
+  await initializeIndexer();
+  RELAYS.forEach(connect);
+}
+
+void main().catch((err: any) => {
+  const error = err?.message || String(err);
+  log("error", "indexer_startup_failed", { error });
+  process.exitCode = 1;
+  setImmediate(() => process.exit(1));
+});
